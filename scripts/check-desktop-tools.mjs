@@ -58,4 +58,14 @@ await Promise.all([
 ]);
 assert.deepEqual(order, ["a1", "a2", "b1", "b2"]);
 
+// An aborted, still-queued call never runs.
+const controller = new AbortController();
+const ran = [];
+const slow = withDesktopLock(async () => { await new Promise((r) => setTimeout(r, 30)); ran.push("slow"); });
+const queued = withDesktopLock(async () => { ran.push("queued"); }, controller.signal);
+controller.abort();
+await slow;
+await assert.rejects(queued, /aborted/);
+assert.deepEqual(ran, ["slow"]);
+
 console.log("desktop tool checks passed");

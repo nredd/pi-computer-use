@@ -51,9 +51,12 @@ Measured, not assumed:
 - Helper restarts happen on reinstall, protocol/binary mismatch, permission relaunch. The extension's `@rN`
   records survive them, so `@rN` can outlive its native ref: expect `root_not_found` / "stale", then rediscover
   with `find_roots`. Refs from earlier sessions, pids and state ids are stale.
-- Root deltas in `act_ui` results are rewritten to the extension's `@rN` refs. Before, they showed the helper's
-  native ref with an `@` prepended (`@r2`) that was a different namespace from `find_roots`' `@r3` for the same
-  dialog. A delta for a root that cannot be resolved shows no ref.
+- Root deltas in `act_ui` results carry helper-native refs until `normalizeRootDeltaRefs()` maps them, once per
+  transaction, to the extension's `@rN` for the same root (registered from `listRoots`, keyed by `windowId`, the
+  same identity `find_roots` uses). An earlier mapper registered a placeholder record under a different identity, so
+  a dialog got `@r2` in the action result and `@r3` from `find_roots`; `check-unpaired-act.mjs` guards this and fails
+  on the old code. Verified live on Bambu's Open panel (delta `@r2` == `find_roots` `@r2`). A delta whose root is
+  gone (`closed`) reuses the existing record, or shows no ref.
 - Known limitation: the helper's element ref table grows for the life of the daemon.
 
 ## Helper lifecycle
@@ -136,3 +139,8 @@ Bugs found by the live run and fixed:
   returned outcome `unknown` and did not dismiss the panel; physical Escape via `desktop_input` did, once Bambu was frontmost.
 - No natural unpaired dialog was found (the alert and Open panel pair with `low`/`exact`). The unpaired path is covered by the ref-only live
   runs above and by `scripts/check-unpaired-act.mjs` (stubbed backend).
+
+Notes: desktop tools and `act_ui` transactions share one lock (every desktop-targeted act is serial, including AX
+acts that never touch the cursor); a queued call that is aborted never runs. A restart is triggered when the
+helper process started before the installed binary's `ctime`, so anything that touches the binary's metadata
+costs one helper restart (and invalidates native refs) at the next session start.

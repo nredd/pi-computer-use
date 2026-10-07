@@ -46,4 +46,27 @@ const successor = observeCalls.at(-1);
 assert.equal(successor.includeImage, false, "unpaired successor must be semantic");
 assert.equal(successor.target.windowId, undefined, "windowId 0 must not be sent");
 assert.equal(successor.target.windowRef, "ax:dlg");
+// Root delta refs: the ref shown for a new dialog must be the one find_roots issues for it, even when the
+// dialog has a real windowId (helper deltas carry helper-native refs, a different namespace).
+const dialog2 = { ...root, rootRef: "ax:dlg2", windowRef: "ax:dlg2", windowId: 99, title: "Confirm", framePoints: { x: 50, y: 50, w: 200, h: 100 } };
+const mainWindow = { ...root, kind: "window", rootRef: "ax:main", windowRef: "ax:main", windowId: 5, title: "Main", isModal: false, isMain: true, isFocused: false };
+currentPlatformBackend.listRoots = async () => [mainWindow, dialog2, root];
+const appeared = [{ change: "appeared", kind: "dialog", ref: "ax:dlg2", title: "Confirm", pid: 7, isModal: true }];
+currentPlatformBackend.act = async () => ({ outcome: "worked", performed: { delivery: "pid" }, rootDelta: appeared });
+currentPlatformBackend.actBatch = async () => ({
+	outcome: "worked",
+	performed: { delivery: "pid", transaction: true, actionCount: 1 },
+	steps: [{ outcome: "worked", rootDelta: appeared }],
+	rootDelta: appeared,
+});
+const second = await call(executeObserve, { root: "@r1", mode: "semantic" });
+const second_state = text(second).match(/stateId ([0-9a-f-]{36})/)[1];
+const acted = await call(executeAct, { stateId: second_state, actions: [{ action: "press", ref: text(second).match(/(@e\d+) AXButton/)[1] }] });
+const deltaRef = text(acted).match(/New root: dialog "Confirm"[^\n]*\((@r\d+)\)/)?.[1];
+assert.ok(deltaRef, `delta line missing an @r ref:\n${text(acted)}`);
+const refreshed = await call(executeFind, { app: "App" });
+const findRef = text(refreshed).match(/(@r\d+) dialog App[^\n]*Confirm/)?.[1];
+assert.equal(deltaRef, findRef, "delta ref and find_roots ref must name the same root with one @r ref");
+assert.doesNotMatch(text(acted), /Unknown App/);
+
 console.log("unpaired act checks passed");

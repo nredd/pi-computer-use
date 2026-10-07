@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Opt-in live check of the Swift helper glue against a real modal NSAlert.
-// Run: PI_COMPUTER_USE_LIVE=1 npm run test:macos-live   (needs Accessibility; moves no cursor, sends no keys)
+// Run: PI_COMPUTER_USE_LIVE=1 npm run test:macos-live   (needs Accessibility; sends no input events, but it
+// RESTARTS the shared helper daemon, which invalidates native refs of any other running pi session)
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -67,9 +68,10 @@ try {
 	(function walk(node) { flat.push(node); (node.children ?? []).forEach(walk); })(look.parsedOutline.root);
 	const cancel = flat.find((node) => node.role === "AXButton" && /cancel/i.test(node.title ?? node.label ?? ""));
 	assert.ok(cancel?.wireRef, "Cancel button not found");
-	const result = await macosBackend.act({ lookId: look.lookId, pid: child.pid, target: { ref: cancel.wireRef }, action: "press", params: {}, policy: "default" });
+	const result = await macosBackend.act({ lookId: look.lookId, pid: child.pid, target: { ref: cancel.wireRef }, action: "press", params: {}, policy: "ax_only" });
 	assert.equal(result.outcome, "worked");
 	console.log("macos live helper checks passed");
 } finally {
 	child.kill();
+	rmSync(dir, { recursive: true, force: true });
 }

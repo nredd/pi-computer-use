@@ -1131,35 +1131,9 @@ function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, erro
 	}
 }
 
-function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[number]): string | undefined {
-	if (!delta.ref) return undefined;
-	if (delta.ref.startsWith("@r")) return delta.ref;
-	for (const record of runtimeState.windowRefs.values()) {
-		if (record.nativeWindowRef === delta.ref || record.ref === delta.ref) return record.ref;
-	}
-	const ref = `@r${runtimeState.nextRootRefIndex++}`;
-	const current = operationState().currentTarget;
-	const record: WindowRefRecord = {
-		ref,
-		appName: current?.pid === delta.pid ? current.appName : "Unknown App",
-		bundleId: current?.pid === delta.pid ? current.bundleId : undefined,
-		pid: delta.pid,
-		windowTitle: delta.title ?? "(untitled)",
-		nativeWindowRef: delta.ref,
-		framePoints: { x: 0, y: 0, w: 1, h: 1 },
-		scaleFactor: 1,
-		isMinimized: false,
-		isOnscreen: true,
-		isMain: false,
-		isFocused: delta.change === "focused",
-	};
-	runtimeState.windowRefs.set(ref, record);
-	runtimeState.windowRefByIdentity.set(windowRecordIdentity(record), ref);
-	return ref;
-}
-
 function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy()): ExecutionTrace {
-	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
+	// Refs stay helper-native here; normalizeRootDeltaRefs() maps them to @rN once per transaction.
+	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta }));
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
 		performed: result.performed,
@@ -1877,17 +1851,27 @@ function extensionRefForNative(pid: number, nativeRef: string): string | undefin
  * the tools accept. Rewrite every delta ref to the extension ref (registering live roots), or drop it.
  */
 export async function normalizeRootDeltaRefs(execution: ExecutionTrace, target: Pick<ResolvedTarget, "pid" | "appName" | "bundleId">): Promise<void> {
-	let roots: PlatformRoot[] | undefined;
-	for (const delta of execution.rootDelta ?? []) {
-		if (!delta.ref || delta.ref.startsWith("@")) continue;
-		let ext = extensionRefForNative(target.pid, delta.ref);
-		if (!ext && delta.change !== "closed") {
-			roots ??= await currentPlatformBackend.listRoots({ pid: target.pid }).catch(() => []);
-			const root = roots.find((candidate) => candidate.rootRef === delta.ref || candidate.windowRef === delta.ref);
-			if (root) ext = storeWindowRefForAppWindow({ appName: target.appName, bundleId: target.bundleId, pid: target.pid }, root).ref;
+	if (!execution.rootDelta?.length) return;
+	const rootsByPid = new Map<number, PlatformRoot[]>();
+	const normalized: NonNullable<ExecutionTrace["rootDelta"]> = [];
+	for (const delta of execution.rootDelta) {
+		if (!delta.ref || delta.ref.startsWith("@")) {
+			normalized.push(delta);
+			continue;
 		}
-		delta.ref = ext;
+		let ext = extensionRefForNative(delta.pid, delta.ref);
+		if (!ext && delta.change !== "closed") {
+			if (!rootsByPid.has(delta.pid)) rootsByPid.set(delta.pid, await currentPlatformBackend.listRoots({ pid: delta.pid }).catch(() => []));
+			const root = rootsByPid.get(delta.pid)!.find((candidate) => candidate.rootRef === delta.ref || candidate.windowRef === delta.ref);
+			if (root) {
+				const sameApp = delta.pid === target.pid;
+				const app: HelperApp = { appName: sameApp ? target.appName : root.appName ?? "Unknown App", bundleId: sameApp ? target.bundleId : root.bundleId, pid: delta.pid };
+				ext = storeWindowRefForAppWindow(app, root).ref;
+			}
+		}
+		normalized.push({ ...delta, ref: ext });
 	}
+	execution.rootDelta = normalized;
 }
 
 /** Root kinds that can take over from a window. Menus, popovers and tooltips appearing are not replacements. */
@@ -2064,7 +2048,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
-	}));
+	}), signal);
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {

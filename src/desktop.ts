@@ -33,8 +33,13 @@ function assertDesktopControlAllowed(): void {
 let desktopQueue: Promise<unknown> = Promise.resolve();
 
 /** Desktop tools share one physical keyboard and pointer: run whole calls one at a time, in arrival order. */
-export function withDesktopLock<T>(work: () => Promise<T>): Promise<T> {
-	const run = desktopQueue.then(work, work);
+export function withDesktopLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	const guarded = async () => {
+		// A call aborted while it waited its turn must not run afterwards.
+		if (signal?.aborted) throw new Error("Operation aborted.");
+		return await work();
+	};
+	const run = desktopQueue.then(guarded, guarded);
 	desktopQueue = run.catch(() => undefined);
 	return run;
 }
@@ -80,7 +85,7 @@ export async function executeDesktopScreenshot(
 		"captureDisplay",
 		{ display: params.display ?? 0, maxDimension: params.maxDimension ?? 1600 },
 		{ signal, timeoutMs: 15_000 },
-	));
+	), signal);
 	const f = result.frame;
 	const layout = result.displays.map((d) => `display ${d.index}${d.isMain ? " (main)" : ""}: origin ${Math.round(d.frame.x)},${Math.round(d.frame.y)} size ${Math.round(d.frame.w)}x${Math.round(d.frame.h)}`).join("\n");
 	const scale = result.image.width / f.w;
@@ -106,7 +111,7 @@ export async function executeDesktopInput(
 	assertDesktopControlAllowed();
 	validateDesktopInput(params);
 	const wire = params.action === "typeText" ? { ...params, action: "type" } : params.action === "keypress" ? { ...params, action: "key" } : params;
-	const result = await withDesktopLock(() => macosHelper.command<{ performed: string; mouse: { x: number; y: number } }>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 }));
+	const result = await withDesktopLock(() => macosHelper.command<{ performed: string; mouse: { x: number; y: number } }>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 }), signal);
 	return {
 		content: [{ type: "text", text: `Performed ${result.performed}. Take a desktop_screenshot to verify the result.` }],
 		details: { tool: "desktop_input", action: result.performed },
