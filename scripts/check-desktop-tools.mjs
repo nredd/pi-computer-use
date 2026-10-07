@@ -55,7 +55,7 @@ assert.match(activated.content[0].text, /TextEdit \(pid 42\) is now the frontmos
 assert.equal(activated.details.pid, 42);
 const read = await executeDesktopInput("r", { action: "readClipboard" });
 assert.match(read.content[0].text, /100001 chars, truncated/);
-assert.match(read.content[0].text, /\nclip$/);
+assert.match(read.content[0].text, /<clipboard>\nclip\n<\/clipboard>$/);
 assert.equal(read.details.truncated, true);
 assert.match((await executeDesktopInput("w", { action: "writeClipboard", text: "abc" })).content[0].text, /Clipboard set \(3 chars\)/);
 macosHelper.command = async () => { throw Object.assign(new Error("No running or installed app named 'Nope'"), { code: "app_not_found" }); };

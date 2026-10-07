@@ -106,6 +106,16 @@ final class AXRefStore {
 		return ref
 	}
 
+	/// Hand `from`'s element refs to `to`. An incremental look (`expand_ui` graft on a base look) keeps
+	/// using the base look's refs outside the grafted subtree, so they must live as long as the new look.
+	func transferElements(from: String, to: String) {
+		guard from != to else { return }
+		lock.lock()
+		defer { lock.unlock() }
+		guard let moved = refsByOwner.removeValue(forKey: from) else { return }
+		refsByOwner[to, default: []].append(contentsOf: moved)
+	}
+
 	/// Forget every element ref minted for `owner` (a look that aged out or failed).
 	func dropElements(owner: String) {
 		lock.lock()
@@ -1506,6 +1516,7 @@ final class Bridge {
 		}
 
 		let baseRecord = baseLookId.flatMap { lookRecord(for: $0) }
+		if let baseLookId, baseRecord != nil { refStore.transferElements(from: baseLookId, to: lookId) }
 		lookStored = true
 		storeLookRecord(LookRecord(
 			lookId: lookId,
@@ -3018,15 +3029,21 @@ final class Bridge {
 	/// `activation_failed` unless the app is frontmost within 5s.
 	private func activateApp(_ query: String) throws -> [String: Any] {
 		let wanted = query.trimmingCharacters(in: .whitespaces)
-		guard !wanted.isEmpty else { throw BridgeFailure(message: "activateApp requires app", code: "invalid_args") }
-		func runningApp() -> NSRunningApplication? {
-			NSWorkspace.shared.runningApplications.first {
-				$0.bundleIdentifier?.caseInsensitiveCompare(wanted) == .orderedSame
-					|| $0.localizedName?.caseInsensitiveCompare(wanted) == .orderedSame
-					|| $0.executableURL?.lastPathComponent.caseInsensitiveCompare(wanted) == .orderedSame
+		guard !wanted.isEmpty, !wanted.contains("/") else { throw BridgeFailure(message: "activateApp requires an app name or bundle id (no paths)", code: "invalid_args") }
+		/// Bundle id beats display name beats executable name; two different apps sharing the winning name is an error.
+		func runningApp() throws -> NSRunningApplication? {
+			let apps = NSWorkspace.shared.runningApplications
+			let tiers: [(NSRunningApplication) -> String?] = [{ $0.bundleIdentifier }, { $0.localizedName }, { $0.executableURL?.lastPathComponent }]
+			for key in tiers {
+				let matches = apps.filter { key($0)?.caseInsensitiveCompare(wanted) == .orderedSame }
+				if Set(matches.map(\.processIdentifier)).count > 1 {
+					throw BridgeFailure(message: "'\(wanted)' matches \(matches.count) running apps; use a bundle id", code: "ambiguous_app")
+				}
+				if let match = matches.first { return match }
 			}
+			return nil
 		}
-		let running = runningApp()
+		let running = try runningApp()
 		let home = FileManager.default.homeDirectoryForCurrentUser.path
 		let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: wanted)
 			?? ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/System/Library/CoreServices", "\(home)/Applications"]
@@ -3036,7 +3053,9 @@ final class Bridge {
 			throw BridgeFailure(message: "No running or installed app named '\(wanted)'", code: "app_not_found")
 		}
 		var app = running
-		if let url = running?.bundleURL ?? installed {
+		// Only fall back to an installed bundle when nothing is running: an unbundled process sharing a name with
+		// an installed .app must not open the other app.
+		if let url = running.map({ $0.bundleURL }) ?? installed {
 			let process = Process()
 			process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
 			process.arguments = [url.path]
@@ -3055,7 +3074,7 @@ final class Bridge {
 			// A fresh launch registers asynchronously; wait for the process to appear.
 			let launchDeadline = Date().addingTimeInterval(10)
 			while app == nil && Date() < launchDeadline {
-				app = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL } ?? runningApp()
+				app = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL } ?? (try? runningApp()) ?? nil
 				if app == nil { Thread.sleep(forTimeInterval: 0.1) }
 			}
 		}

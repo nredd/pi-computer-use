@@ -103,4 +103,23 @@ await held;
 await foreground;
 assert.ok(policies.includes("foreground"));
 
+// Once a transaction goes physical it keeps the lock to the end: a desktop_input queued during step 1 runs
+// only after step 2 (which may rely on focus step 1 set up), never between them.
+const order = [];
+let queuedDesk;
+currentPlatformBackend.act = async (request) => {
+	if (request.policy !== "foreground") throw Object.assign(new Error("needs focus"), { code: "foreground_required" });
+	order.push("fg");
+	queuedDesk ??= withDesktopLock(async () => { order.push("desk"); });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	return { outcome: "worked", performed: { delivery: "hid" } };
+};
+const two = await call(executeObserve, { root: "@r1", mode: "semantic" });
+const goTwice = text(two).match(/(@e\d+) AXButton/)[1];
+await call(executeAct, { stateId: text(two).match(/stateId ([0-9a-f-]{36})/)[1], actions: [{ action: "press", ref: goTwice }, { action: "press", ref: goTwice }] });
+await queuedDesk;
+assert.deepEqual(order, ["fg", "fg", "desk"], "desktop_input must not interleave inside a physical act_ui transaction");
+// And the lease is released afterwards: the lock is free again.
+assert.equal(await Promise.race([withDesktopLock(async () => "free"), new Promise((resolve) => setTimeout(() => resolve("stuck"), 1_000))]), "free");
+
 console.log("unpaired act checks passed");

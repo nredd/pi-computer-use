@@ -60,7 +60,10 @@ Measured, not assumed:
 - Element refs live as long as their look: the helper keeps 8 look records and drops a look's element refs when it
   ages out (or when the look fails before being recorded). Unowned element refs (one-off element queries) sit in a
   FIFO capped at 1024. Window refs are deduped per window and not evicted (bounded by the number of windows).
-  Acting on an element from an evicted look fails with `stale_ref`, live-checked in `check-macos-helper-live.mjs`.
+  An incremental look (`expand_ui` graft, `baseLookId`) inherits its base look's refs, since the grafted outline
+  still uses them. Acting with a current look on a ref whose look aged out fails with `stale_ref`; acting with an
+  aged-out look id fails with `stale_look`. Both live-checked in `check-macos-helper-live.mjs`, which also fails
+  when the base-look transfer is disabled (checked).
 
 ## Helper lifecycle
 
@@ -81,15 +84,19 @@ inside a background app is not enough (`focusWindow` can report `focused` while 
 so call `activateApp` first.
 
 Non-pointer actions on the same tool:
-- `activateApp { app }`: name, bundle id, or executable name. Launches the app when not running and fails with
+- `activateApp { app }`: bundle id, then display name, then executable name (`ambiguous_app` when two running apps
+  share the winning name; paths are rejected). Launches the app when not running and fails with
   `activation_failed` unless it is frontmost within 5s; `app_not_found` when neither running nor installed. It runs
   `/usr/bin/open <bundle>` as a killable subprocess: AX `AXFrontmost` and `NSRunningApplication.activate` were
   refused from the background helper live (macOS 14+ cooperative activation), and an in-process
   `NSWorkspace.openApplication` hung in `_sandbox_extension_issue` and wedged the daemon. Unbundled executables
   get AX + `activate()` only.
-- `readClipboard`: plain text only, capped at 100k chars (`truncated`); non-text gives `clipboard_empty`.
+- `readClipboard`: plain text only, capped at 100k characters (`truncated`); non-text gives `clipboard_empty`. The
+  result is fenced in `<clipboard>` and labelled as data, since it can hold anything (including secrets) and is
+  gated only by `desktop_control`.
 - `writeClipboard { text }`: replaces the clipboard with plain text.
- `scroll` follows macOS natural scrolling: `scrollY: -5` arrives as a positive delta. Prefer `act_ui` for controls reachable by ref. Helper commands:
+
+`scroll` follows macOS natural scrolling: `scrollY: -5` arrives as a positive delta. Prefer `act_ui` for controls reachable by ref. Helper commands:
 `captureDisplay`, `desktopInput` (wire actions `type`/`key`). Needs Screen Recording and Accessibility.
 
 ## Tests
@@ -162,9 +169,10 @@ Bugs found by the live run and fixed:
 - No natural unpaired dialog was found (the alert and Open panel pair with `low`/`exact`). The unpaired path is covered by the ref-only live
   runs above and by `scripts/check-unpaired-act.mjs` (stubbed backend).
 
-Notes: desktop tools and `act_ui` share one lock, taken *only* around foreground (physical HID) act delivery:
-the `needsForeground`/current-focus case, the side-effect-free foreground retry, and the `foreground_required`
-fallback. Background, pid, and AX acts never wait on `desktop_input`. Lock order is window write lock, then
+Notes: desktop tools and `act_ui` share one lock. An `act_ui` transaction takes it lazily at its first foreground
+(physical HID) step (the `needsForeground`/current-focus case, the side-effect-free foreground retry, the
+`foreground_required` fallback) and keeps it until the transaction ends, so a later step relying on focus set by an
+earlier one is never interleaved with `desktop_input`. Transactions that stay background/pid/AX never take it. Lock order is window write lock, then
 desktop lock; the desktop tools take only the desktop lock. A queued call that is aborted never runs. A restart is triggered when the
 helper process started before the installed binary's `ctime`, so anything that touches the binary's metadata
 costs one helper restart (and invalidates native refs) at the next session start.

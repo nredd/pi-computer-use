@@ -69,6 +69,13 @@ check(store.elementCount == 2, "dropping twice is a no-op")
 let u = (0..<5).map { _ in store.storeElement(el, snapshot: AXRefStore.Snapshot(role: "r", identifier: "", label: "", rect: .zero)) }
 check(store.elementCount == 5, "unowned refs capped at 3")
 check(store.element(for: u[0]) == nil && store.snapshot(for: u[1]) == nil && store.element(for: u[4]) != nil, "unowned FIFO evicts the oldest with its snapshot")
+let g = AXRefStore()
+let base = g.storeElement(el, owner: "look_a")
+g.transferElements(from: "look_a", to: "look_b")
+g.dropElements(owner: "look_a")
+check(g.element(for: base) != nil, "refs handed to a successor look survive the base look's eviction")
+g.dropElements(owner: "look_b")
+check(g.element(for: base) == nil, "transferred refs drop with the successor look")
 check(AXRefStore().storeWindow(el) != w1, "another store (helper process) never reissues the same ref")
 
 if failures > 0 { exit(1) }

@@ -19,7 +19,7 @@ import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDeliv
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler } from "./runtime.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
-import { withDesktopLock } from "./desktop.ts";
+import { withDesktopTransaction, withPhysicalInput } from "./desktop.ts";
 import type { PlatformRoot } from "./platform/types.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
@@ -1160,9 +1160,10 @@ async function helperAct(
 	};
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
-	// Only foreground delivery posts real cursor/keyboard events; it alone shares the desktop lock with
-	// desktop_input / desktop_screenshot. Background, pid, and AX acts stay concurrent per window.
-	const actInForeground = () => withDesktopLock(() => currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }), signal);
+	// Only foreground delivery posts real cursor/keyboard events; it alone takes the desktop lock shared with
+	// desktop_input / desktop_screenshot, held to the end of the act_ui transaction once taken.
+	// Background, pid, and AX acts stay concurrent per window.
+	const actInForeground = () => withPhysicalInput(() => currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }), signal);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
 		const foreground = checked(await actInForeground());
 		const trace = executionTraceFromAct(foreground, "foreground");
@@ -1993,7 +1994,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal, { preferModal: false }), signal);
 	const noteBefore = state.currentNote;
-	return await withWindowWriteLock(target, async () => {
+	return await withWindowWriteLock(target, () => withDesktopTransaction(async () => {
 		const headless = getComputerUseConfig().headless;
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
 		await normalizeRootDeltaRefs(execution, target);
@@ -2050,7 +2051,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
-	});
+	}, signal));
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {

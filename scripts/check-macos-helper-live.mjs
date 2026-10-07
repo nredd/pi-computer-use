@@ -108,9 +108,12 @@ try {
 	}
 	await assert.rejects(macosHelper.command("desktopInput", { action: "writeClipboard", text: "" }), (error) => error.code === "invalid_args");
 
-	// act by ref on an unpaired look: dismiss the dialog with Cancel.
+	// Incremental looks (expand_ui grafts pass baseLookId) inherit the base look's refs: after 9 chained looks the
+	// first look's Cancel ref still works. Then press it (by ref, on an unpaired look) to dismiss the dialog.
 	const cancel = cancelOf(look);
-	const result = await macosBackend.act({ lookId: look.lookId, pid: child.pid, target: { ref: cancel.wireRef }, action: "press", params: {}, policy: "ax_only" });
+	let chained = look;
+	for (let i = 0; i < 9; i += 1) chained = await macosBackend.observe({ target, baseLookId: chained.lookId, readText: "never", includeImage: false });
+	const result = await macosBackend.act({ lookId: chained.lookId, pid: child.pid, target: { ref: cancel.wireRef }, action: "press", params: {}, policy: "ax_only" });
 	assert.equal(result.outcome, "worked");
 	console.log("macos live helper checks passed");
 } finally {
