@@ -89,3 +89,17 @@ Not validated:
 - `root_stale` and `cause: replaced` on a live app; ref expiry after long gaps (no TTL measured).
 - Fusion batch (Py via SPACE, click console, type, RETURN) was not re-run.
 - Bambu Cmd+I/Cmd+N dialogs.
+
+### Whole-desktop tools (live, 2026-10-07, two displays, unreleased build)
+
+Worked:
+- `captureDisplay` on both displays (main 2560x1080 at 0,0; second 1920x1080 at 341,-1080, i.e. negative y); bad display index -> `display_not_found`
+- `desktopInput` `moveMouse` lands exactly, including negative y on the second display; the returned `mouse` is read back in the same top-left global space
+- In a scratch TextEdit document: click, unicode typing, `return`, `cmd+a`, `delete`, triple-click, drag-select (selected text confirmed via AX), scroll
+- Invalid actions and arguments fail with `invalid_args`
+
+Bugs found by the live run and fixed:
+- Returned `mouse` came from `NSEvent.mouseLocation` (bottom-left origin) and was read before the move settled; now `CGEvent(source: nil).location` after a short settle
+- Drags posted one event per waypoint; they now interpolate (<=12pt steps) with click state set
+
+Not tested live: clicking or typing on the second display, right/middle buttons, `drag` with more than two waypoints, scroll effect.

@@ -14,7 +14,7 @@ const match = source.match(/\/\/ BEGIN PURE[^\n]*\n([\s\S]*?)\/\/ END PURE/);
 if (!match) throw new Error("PURE region not found in bridge.swift");
 
 const main = `
-import Foundation
+import Foundation\nimport CoreGraphics
 var failures = 0
 func check(_ ok: Bool, _ name: String) { if !ok { failures += 1; print("FAIL: \\(name)") } }
 
@@ -34,6 +34,13 @@ check(resolveCaptureTarget(windowId: 12, wantsImage: false) == .semanticOnly, "p
 check(resolveCaptureTarget(windowId: nil, wantsImage: false) == .semanticOnly, "unpaired semantic ok")
 check(resolveCaptureTarget(windowId: nil, wantsImage: true) == .notCapturable, "unpaired visual errors")
 check(resolveCaptureTarget(windowId: 0, wantsImage: true) == .notCapturable, "window 0 never captured")
+
+// Drag interpolation
+let pts = interpolatedDragPoints(from: CGPoint(x: 0, y: 0), to: CGPoint(x: 100, y: 0), maxStep: 12)
+check(pts.count == 9 && pts.last == CGPoint(x: 100, y: 0), "100pt drag steps <=12 and ends exactly at target")
+check(zip([CGPoint(x: 0, y: 0)] + pts, pts).allSatisfy { hypot($1.x - $0.x, $1.y - $0.y) <= 12.0001 }, "no step exceeds maxStep")
+check(interpolatedDragPoints(from: CGPoint(x: 5, y: 5), to: CGPoint(x: 5, y: 5), maxStep: 12) == [CGPoint(x: 5, y: 5)], "zero-length drag is the endpoint")
+check(interpolatedDragPoints(from: .zero, to: CGPoint(x: 100000, y: 0), maxStep: 12).count == 400, "steps capped")
 
 if failures > 0 { exit(1) }
 print("macos native pure checks passed")

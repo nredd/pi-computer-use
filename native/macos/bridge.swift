@@ -125,6 +125,16 @@ func resolveCaptureTarget(windowId: UInt32?, wantsImage: Bool) -> CaptureTarget 
 	if let windowId, windowId > 0 { return wantsImage ? .capture(windowId: windowId) : .semanticOnly }
 	return wantsImage ? .notCapturable : .semanticOnly
 }
+/// Points from `start` (exclusive) to `end` (inclusive), no more than `maxStep` apart, capped at 400 steps.
+func interpolatedDragPoints(from start: CGPoint, to end: CGPoint, maxStep: CGFloat) -> [CGPoint] {
+	let distance = hypot(end.x - start.x, end.y - start.y)
+	guard distance > 0, maxStep > 0 else { return [end] }
+	let steps = min(400, max(1, Int((distance / maxStep).rounded(.up))))
+	return (1...steps).map { index in
+		let t = CGFloat(index) / CGFloat(steps)
+		return CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
+	}
+}
 // END PURE
 
 private struct LookRecord {
@@ -2913,7 +2923,10 @@ final class Bridge {
 		default:
 			throw BridgeFailure(message: "Unknown desktop action '\(action)'", code: "invalid_args")
 		}
-		return ["performed": action, "mouse": getMousePosition()]
+		// Read back in the same top-left global space the input uses (NSEvent.mouseLocation is bottom-left).
+		usleep(30_000)
+		let cursor = CGEvent(source: nil)?.location ?? .zero
+		return ["performed": action, "mouse": ["x": cursor.x, "y": cursor.y]]
 	}
 
 	private func getMousePosition() -> [String: Any] {
@@ -3555,15 +3568,22 @@ final class Bridge {
 		guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse down event", code: "input_failed")
 		}
+		down.setIntegerValueField(.mouseEventClickState, value: 1)
 		postEvent(down, pid: pid, delivery: delivery)
-		usleep(12_000)
+		usleep(30_000)
 
+		// Real drags are a stream of positions; apps ignore a single long jump. Step each segment (~12pt).
+		var previous = first
 		for point in points.dropFirst() {
-			guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: point, mouseButton: .left) else {
-				throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
+			for step in interpolatedDragPoints(from: previous, to: point, maxStep: 12) {
+				guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: step, mouseButton: .left) else {
+					throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
+				}
+				drag.setIntegerValueField(.mouseEventClickState, value: 1)
+				postEvent(drag, pid: pid, delivery: delivery)
+				usleep(8_000)
 			}
-			postEvent(drag, pid: pid, delivery: delivery)
-			usleep(8_000)
+			previous = point
 		}
 
 		guard let last = points.last,
@@ -3571,6 +3591,7 @@ final class Bridge {
 		else {
 			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
 		}
+		up.setIntegerValueField(.mouseEventClickState, value: 1)
 		postEvent(up, pid: pid, delivery: delivery)
 	}
 
