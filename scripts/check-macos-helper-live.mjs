@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Opt-in live check of the Swift helper glue against a real modal NSAlert.
+// Opt-in live check of the Swift helper glue against a real modal NSAlert. It also activates Finder and
+// the fixture, and round-trips the clipboard (restoring the original text).
 // Run: PI_COMPUTER_USE_LIVE=1 npm run test:macos-live   (needs Accessibility; sends no input events, but it
 // RESTARTS the shared helper daemon, which invalidates native refs of any other running pi session)
 import assert from "node:assert/strict";
@@ -63,11 +64,52 @@ try {
 	}
 	await assert.rejects(macosHelper.command("captureDisplay", { display: 99 }), (error) => error.code === "display_not_found");
 
+	const target = { pid: child.pid, rootRef: fresh, windowRef: fresh };
+	const cancelOf = (someLook) => {
+		const flat = [];
+		(function walk(node) { flat.push(node); (node.children ?? []).forEach(walk); })(someLook.parsedOutline.root);
+		const button = flat.find((node) => node.role === "AXButton" && /cancel/i.test(node.title ?? node.label ?? ""));
+		assert.ok(button?.wireRef, "Cancel button not found");
+		return button;
+	};
+
+	// Element refs live as long as their look: after 8 newer looks (the record cap) the first look's refs are gone.
+	const oldCancel = cancelOf(look);
+	let latest = look;
+	for (let i = 0; i < 8; i += 1) latest = await macosBackend.observe({ target, readText: "never", includeImage: false });
+	await assert.rejects(
+		macosBackend.act({ lookId: latest.lookId, pid: child.pid, target: { ref: oldCancel.wireRef }, action: "press", params: {}, policy: "ax_only" }),
+		(error) => error.code === "stale_ref",
+	);
+	look = latest;
+
+	// activateApp: bring another app forward, then the fixture back by name; unknown apps fail clearly.
+	await macosHelper.command("desktopInput", { action: "activateApp", app: "com.apple.finder" });
+	const activated = await macosHelper.command("desktopInput", { action: "activateApp", app: "alertapp" });
+	assert.equal(activated.pid, child.pid);
+	assert.equal((await macosHelper.command("getFrontmost", {})).pid, child.pid, "fixture must be frontmost");
+	await assert.rejects(macosHelper.command("desktopInput", { action: "activateApp", app: "pi-no-such-app-zz" }), (error) => error.code === "app_not_found");
+
+	// Clipboard round trip, restoring the user's text. Skipped when the clipboard holds non-text (cannot restore it).
+	const original = await macosHelper.command("desktopInput", { action: "readClipboard" }).catch((error) => (error.code === "clipboard_empty" ? undefined : Promise.reject(error)));
+	if (original && !original.truncated) {
+		try {
+			const probe = `pi-clip-${Date.now()}-é`;
+			assert.equal((await macosHelper.command("desktopInput", { action: "writeClipboard", text: probe })).length, probe.length);
+			const back = await macosHelper.command("desktopInput", { action: "readClipboard" });
+			assert.equal(back.text, probe);
+			assert.equal(back.truncated, false);
+		} finally {
+			await macosHelper.command("desktopInput", { action: "writeClipboard", text: original.text });
+		}
+		assert.equal((await macosHelper.command("desktopInput", { action: "readClipboard" })).text, original.text, "clipboard restored");
+	} else {
+		console.log("clipboard round trip skipped (clipboard holds no restorable text)");
+	}
+	await assert.rejects(macosHelper.command("desktopInput", { action: "writeClipboard", text: "" }), (error) => error.code === "invalid_args");
+
 	// act by ref on an unpaired look: dismiss the dialog with Cancel.
-	const flat = [];
-	(function walk(node) { flat.push(node); (node.children ?? []).forEach(walk); })(look.parsedOutline.root);
-	const cancel = flat.find((node) => node.role === "AXButton" && /cancel/i.test(node.title ?? node.label ?? ""));
-	assert.ok(cancel?.wireRef, "Cancel button not found");
+	const cancel = cancelOf(look);
 	const result = await macosBackend.act({ lookId: look.lookId, pid: child.pid, target: { ref: cancel.wireRef }, action: "press", params: {}, policy: "ax_only" });
 	assert.equal(result.outcome, "worked");
 	console.log("macos live helper checks passed");

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 const { currentPlatformBackend } = await import("../src/platform/index.ts");
 const { executeFind, executeObserve, executeAct } = await import("../src/bridge.ts");
 const { parseLookResponse } = await import("../src/outline.ts");
+const { withDesktopLock } = await import("../src/desktop.ts");
 
 const root = {
 	kind: "dialog", rootRef: "ax:dlg", windowRef: "ax:dlg", pid: 7, appName: "App", title: "Unpaired", zOrder: 0,
@@ -68,5 +69,38 @@ const refreshed = await call(executeFind, { app: "App" });
 const findRef = text(refreshed).match(/(@r\d+) dialog App[^\n]*Confirm/)?.[1];
 assert.equal(deltaRef, findRef, "delta ref and find_roots ref must name the same root with one @r ref");
 assert.doesNotMatch(text(acted), /Unknown App/);
+
+// Desktop lock scope: only foreground (physical) delivery waits for desktop_input; background acts don't.
+currentPlatformBackend.listRoots = async () => [root];
+const policies = [];
+let needForeground = false;
+currentPlatformBackend.act = async (request) => {
+	policies.push(request.policy);
+	if (needForeground && request.policy !== "foreground") throw Object.assign(new Error("needs focus"), { code: "foreground_required" });
+	return { outcome: "worked", performed: { delivery: request.policy === "foreground" ? "hid" : "pid" } };
+};
+let release;
+const held = withDesktopLock(() => new Promise((resolve) => { release = resolve; }));
+const lockObs = await call(executeObserve, { root: "@r1", mode: "semantic" });
+const lockState = () => text(lockObs).match(/stateId ([0-9a-f-]{36})/)[1];
+const goRef = text(lockObs).match(/(@e\d+) AXButton/)[1];
+const background = await Promise.race([
+	call(executeAct, { stateId: lockState(), actions: [{ action: "press", ref: goRef }] }).then(() => "done"),
+	new Promise((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+]);
+assert.equal(background, "done", "a background act must not wait for the desktop lock");
+assert.ok(!policies.includes("foreground"));
+needForeground = true;
+policies.length = 0;
+const again = await call(executeObserve, { root: "@r1", mode: "semantic" });
+let foregroundDone = false;
+const foreground = call(executeAct, { stateId: text(again).match(/stateId ([0-9a-f-]{36})/)[1], actions: [{ action: "press", ref: text(again).match(/(@e\d+) AXButton/)[1] }] }).then(() => { foregroundDone = true; });
+await new Promise((resolve) => setTimeout(resolve, 200));
+assert.equal(foregroundDone, false, "a foreground act must wait for the desktop lock");
+assert.ok(!policies.includes("foreground"), "foreground delivery must not start while the lock is held");
+release();
+await held;
+await foreground;
+assert.ok(policies.includes("foreground"));
 
 console.log("unpaired act checks passed");

@@ -1160,8 +1160,11 @@ async function helperAct(
 	};
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
+	// Only foreground delivery posts real cursor/keyboard events; it alone shares the desktop lock with
+	// desktop_input / desktop_screenshot. Background, pid, and AX acts stay concurrent per window.
+	const actInForeground = () => withDesktopLock(() => currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }), signal);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+		const foreground = checked(await actInForeground());
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = false;
 		return trace;
@@ -1170,7 +1173,7 @@ async function helperAct(
 		const initialPolicy = headless ? "ax_only" : "background";
 		const result = checked(await currentPlatformBackend.act(helperActRequest(target, action, initialPolicy), { signal, timeoutMs }));
 		if (canRetryInForeground(action, result.outcome, headless)) {
-			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+			const foreground = checked(await actInForeground());
 			const trace = executionTraceFromAct(foreground, "foreground");
 			trace.backgroundFirst = true;
 			trace.escalatedToForeground = true;
@@ -1184,7 +1187,7 @@ async function helperAct(
 	} catch (error) {
 		const code = (error as Error & { code?: string })?.code;
 		if (code !== "foreground_required" || headless) throw error;
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+		const foreground = checked(await actInForeground());
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = true;
 		trace.escalatedToForeground = true;
@@ -1990,8 +1993,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal, { preferModal: false }), signal);
 	const noteBefore = state.currentNote;
-	// One physical keyboard and pointer: never interleave with desktop_input / desktop_screenshot.
-	return await withDesktopLock(() => withWindowWriteLock(target, async () => {
+	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
 		await normalizeRootDeltaRefs(execution, target);
@@ -2048,7 +2050,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
-	}), signal);
+	});
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {

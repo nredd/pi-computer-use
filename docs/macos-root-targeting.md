@@ -57,7 +57,10 @@ Measured, not assumed:
   a dialog got `@r2` in the action result and `@r3` from `find_roots`; `check-unpaired-act.mjs` guards this and fails
   on the old code. Verified live on Bambu's Open panel (delta `@r2` == `find_roots` `@r2`). A delta whose root is
   gone (`closed`) reuses the existing record, or shows no ref.
-- Known limitation: the helper's element ref table grows for the life of the daemon.
+- Element refs live as long as their look: the helper keeps 8 look records and drops a look's element refs when it
+  ages out (or when the look fails before being recorded). Unowned element refs (one-off element queries) sit in a
+  FIFO capped at 1024. Window refs are deduped per window and not evicted (bounded by the number of windows).
+  Acting on an element from an evicted look fails with `stale_ref`, live-checked in `check-macos-helper-live.mjs`.
 
 ## Helper lifecycle
 
@@ -75,14 +78,27 @@ image-to-point mapping. `desktop_input` posts physical HID input in global point
 `click`, `scroll`, `drag`, `typeText`, `keypress`. It moves the real cursor and types into whatever has
 focus, so verify with a screenshot. Input goes to the *frontmost app*: raising a window
 inside a background app is not enough (`focusWindow` can report `focused` while another app is frontmost),
-activate the app first. `scroll` follows macOS natural scrolling: `scrollY: -5` arrives as a positive delta. Prefer `act_ui` for controls reachable by ref. Helper commands:
+so call `activateApp` first.
+
+Non-pointer actions on the same tool:
+- `activateApp { app }`: name, bundle id, or executable name. Launches the app when not running and fails with
+  `activation_failed` unless it is frontmost within 5s; `app_not_found` when neither running nor installed. It runs
+  `/usr/bin/open <bundle>` as a killable subprocess: AX `AXFrontmost` and `NSRunningApplication.activate` were
+  refused from the background helper live (macOS 14+ cooperative activation), and an in-process
+  `NSWorkspace.openApplication` hung in `_sandbox_extension_issue` and wedged the daemon. Unbundled executables
+  get AX + `activate()` only.
+- `readClipboard`: plain text only, capped at 100k chars (`truncated`); non-text gives `clipboard_empty`.
+- `writeClipboard { text }`: replaces the clipboard with plain text.
+ `scroll` follows macOS natural scrolling: `scrollY: -5` arrives as a positive delta. Prefer `act_ui` for controls reachable by ref. Helper commands:
 `captureDisplay`, `desktopInput` (wire actions `type`/`key`). Needs Screen Recording and Accessibility.
 
 ## Tests
 
 `npm run test:macos-target`, `test:macos-native` (compiles the `PURE` region of `bridge.swift`),
-`test:act-outcomes`, `test:desktop`. Swift glue outside the `PURE` region (`windowElement`, `look`,
-`act`, `desktopInput` parsing) has no automated test; it was only exercised live.
+`test:act-outcomes`, `test:desktop`, `test:unpaired` (stubbed backend: unpaired successor, delta refs, lock
+scope). `PI_COMPUTER_USE_LIVE=1 npm run test:macos-live` drives the real helper against an `NSAlert` fixture
+(`windowElement`, `look`, `act`, `axWaitFor`, `desktopInput` parsing, `activateApp`, clipboard round trip with
+restore, ref epoch across a restart, look-scoped ref eviction). It restarts the shared helper daemon.
 
 ## Real GUI validation
 
@@ -102,7 +118,8 @@ Worked:
   in this session, call find_roots" error.
 
 Observed, not fixed:
-- observe on a root ref can return a different `@r` (`@r16` -> `@r17`); refs are not stable across a dialog's life.
+- observe on a root ref can return a different `@r` (`@r16` -> `@r17`). Root cause found later: action results
+  printed helper-native refs; fixed by `normalizeRootDeltaRefs()` (see Ref lifecycle).
 
 Not validated:
 - An unpaired dialog (no `windowId`): none was available, every dialog seen paired. The `windowRef`
@@ -137,10 +154,17 @@ Bugs found by the live run and fixed:
 - Fusion with the sidebar up: Py radio via SPACE, then click console field + `print(1)` + RETURN in one batch; the console shows `1`.
 - Bambu Cmd+I: `act_ui` reports `New root: dialog "Open" (modal)` and a `Note:` that a foreground modal is in front. Background-delivered Escape
   returned outcome `unknown` and did not dismiss the panel; physical Escape via `desktop_input` did, once Bambu was frontmost.
+- `activateApp` TextEdit, cmd+n, `writeClipboard`, cmd+v: the scratch doc's AX value is the clipboard text (incl. `é`);
+  closed without saving, clipboard restored. Driven by the helper only, no AppleScript (`osascript` from a terminal
+  triggers an Automation prompt per target app).
+- `activateApp` launched Calculator (not running) and switched Finder <-> TextEdit; unknown names -> `app_not_found`.
+- `desktop_input` moves running concurrently with a background `act_ui` click on Fusion: both completed, no errors.
 - No natural unpaired dialog was found (the alert and Open panel pair with `low`/`exact`). The unpaired path is covered by the ref-only live
   runs above and by `scripts/check-unpaired-act.mjs` (stubbed backend).
 
-Notes: desktop tools and `act_ui` transactions share one lock (every desktop-targeted act is serial, including AX
-acts that never touch the cursor); a queued call that is aborted never runs. A restart is triggered when the
+Notes: desktop tools and `act_ui` share one lock, taken *only* around foreground (physical HID) act delivery:
+the `needsForeground`/current-focus case, the side-effect-free foreground retry, and the `foreground_required`
+fallback. Background, pid, and AX acts never wait on `desktop_input`. Lock order is window write lock, then
+desktop lock; the desktop tools take only the desktop lock. A queued call that is aborted never runs. A restart is triggered when the
 helper process started before the installed binary's `ctime`, so anything that touches the binary's metadata
 costs one helper restart (and invalidates native refs) at the next session start.

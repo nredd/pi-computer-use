@@ -192,10 +192,10 @@ const desktopScreenshotTool = defineTool({
 const desktopInputTool = defineTool({
 	name: "desktop_input",
 	label: "Desktop Input",
-	description: "Physical mouse and keyboard input in global screen points, like a person at the keys. Moves the real cursor and types into whatever has focus.",
-	promptSnippet: "Verify with desktop_screenshot after acting; prefer act_ui for ref-targetable app controls.",
+	description: "Physical mouse and keyboard input in global screen points, like a person at the keys. Moves the real cursor; keys and text go to the FRONTMOST app, so call activateApp first. Also reads/writes clipboard text.",
+	promptSnippet: "activateApp before typing or keys (input goes to the frontmost app); verify with desktop_screenshot; prefer act_ui for ref-targetable app controls.",
 	parameters: Type.Object({
-		action: Type.Union([Type.Literal("moveMouse"), Type.Literal("click"), Type.Literal("scroll"), Type.Literal("drag"), Type.Literal("typeText"), Type.Literal("keypress")], { description: "moveMouse/click/scroll need x,y; drag needs path; typeText needs text; keypress needs keys" }),
+		action: Type.Union([Type.Literal("moveMouse"), Type.Literal("click"), Type.Literal("scroll"), Type.Literal("drag"), Type.Literal("typeText"), Type.Literal("keypress"), Type.Literal("activateApp"), Type.Literal("readClipboard"), Type.Literal("writeClipboard")], { description: "moveMouse/click/scroll need x,y; drag needs path; typeText/writeClipboard need text; keypress needs keys; activateApp needs app (launches it if not running); readClipboard returns clipboard text" }),
 		x: Type.Optional(Type.Number({ description: "Global point x" })),
 		y: Type.Optional(Type.Number({ description: "Global point y (negative above the main display is valid)" })),
 		button: mouseButton,
@@ -205,6 +205,7 @@ const desktopInputTool = defineTool({
 		path: Type.Optional(Type.Array(Type.Object(point), { minItems: 2 })),
 		text: Type.Optional(Type.String()),
 		keys: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+		app: Type.Optional(Type.String({ description: "App name or bundle id for activateApp" })),
 	}),
 	execute: executeDesktopInput,
 });

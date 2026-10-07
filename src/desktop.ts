@@ -15,7 +15,10 @@ export type DesktopInputParams =
 	| { action: "scroll"; x: number; y: number; scrollX?: number; scrollY?: number }
 	| { action: "drag"; path: Array<{ x: number; y: number }> }
 	| { action: "typeText"; text: string }
-	| { action: "keypress"; keys: string[] };
+	| { action: "keypress"; keys: string[] }
+	| { action: "activateApp"; app: string }
+	| { action: "readClipboard" }
+	| { action: "writeClipboard"; text: string };
 
 interface DisplayInfo {
 	index: number;
@@ -63,7 +66,13 @@ export function validateDesktopInput(params: DesktopInputParams): void {
 			}
 			return;
 		case "typeText":
-			if (typeof params.text !== "string" || params.text.length === 0) throw new Error("typeText requires non-empty text.");
+		case "writeClipboard":
+			if (typeof params.text !== "string" || params.text.length === 0) throw new Error(`${params.action} requires non-empty text.`);
+			return;
+		case "activateApp":
+			if (typeof params.app !== "string" || params.app.trim().length === 0) throw new Error("activateApp requires app (a name or bundle id).");
+			return;
+		case "readClipboard":
 			return;
 		case "keypress":
 			if (!Array.isArray(params.keys) || params.keys.length === 0) throw new Error("keypress requires keys.");
@@ -101,6 +110,31 @@ export async function executeDesktopScreenshot(
 	};
 }
 
+interface DesktopInputResult {
+	performed: string;
+	mouse?: { x: number; y: number };
+	pid?: number;
+	appName?: string;
+	bundleId?: string;
+	text?: string;
+	truncated?: boolean;
+	length?: number;
+}
+
+/** Model-facing summary of one desktop_input result. */
+export function desktopInputText(result: DesktopInputResult): string {
+	switch (result.performed) {
+		case "activateApp":
+			return `${result.appName} (pid ${result.pid}) is now the frontmost app; desktop_input keys and text go to it.`;
+		case "readClipboard":
+			return `Clipboard text (${result.length} chars${result.truncated ? ", truncated to 100000" : ""}):\n${result.text}`;
+		case "writeClipboard":
+			return `Clipboard set (${result.length} chars).`;
+		default:
+			return `Performed ${result.performed}. Take a desktop_screenshot to verify the result.`;
+	}
+}
+
 export async function executeDesktopInput(
 	_id: string,
 	params: DesktopInputParams,
@@ -111,9 +145,9 @@ export async function executeDesktopInput(
 	assertDesktopControlAllowed();
 	validateDesktopInput(params);
 	const wire = params.action === "typeText" ? { ...params, action: "type" } : params.action === "keypress" ? { ...params, action: "key" } : params;
-	const result = await withDesktopLock(() => macosHelper.command<{ performed: string; mouse: { x: number; y: number } }>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 }), signal);
+	const result = await withDesktopLock(() => macosHelper.command<DesktopInputResult>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 }), signal);
 	return {
-		content: [{ type: "text", text: `Performed ${result.performed}. Take a desktop_screenshot to verify the result.` }],
-		details: { tool: "desktop_input", action: result.performed },
+		content: [{ type: "text", text: desktopInputText(result) }],
+		details: { tool: "desktop_input", action: result.performed, ...(result.pid !== undefined ? { pid: result.pid, appName: result.appName } : {}), ...(result.truncated !== undefined ? { truncated: result.truncated, length: result.length } : {}) },
 	};
 }

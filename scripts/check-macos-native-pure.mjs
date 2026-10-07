@@ -14,7 +14,7 @@ const match = source.match(/\/\/ BEGIN PURE[^\n]*\n([\s\S]*?)\/\/ END PURE/);
 if (!match) throw new Error("PURE region not found in bridge.swift");
 
 const main = `
-import Foundation\nimport CoreGraphics
+import Foundation\nimport CoreGraphics\nimport ApplicationServices
 var failures = 0
 func check(_ ok: Bool, _ name: String) { if !ok { failures += 1; print("FAIL: \\(name)") } }
 
@@ -51,6 +51,25 @@ check(pts.count == 9 && pts.last == CGPoint(x: 100, y: 0), "100pt drag steps <=1
 check(zip([CGPoint(x: 0, y: 0)] + pts, pts).allSatisfy { hypot($1.x - $0.x, $1.y - $0.y) <= 12.0001 }, "no step exceeds maxStep")
 check(interpolatedDragPoints(from: CGPoint(x: 5, y: 5), to: CGPoint(x: 5, y: 5), maxStep: 12) == [CGPoint(x: 5, y: 5)], "zero-length drag is the endpoint")
 check(interpolatedDragPoints(from: .zero, to: CGPoint(x: 100000, y: 0), maxStep: 12).count == 400, "steps capped")
+
+// Ref store: element refs live as long as their look; unowned refs are FIFO-capped
+let store = AXRefStore(unownedCapacity: 3)
+let el = AXUIElementCreateApplication(getpid())
+let w1 = store.storeWindow(el)
+check(store.storeWindow(el) == w1, "window refs are deduped")
+check(w1.range(of: "^w[0-9a-f]+-[0-9]+$", options: .regularExpression) != nil, "window ref carries the epoch")
+let a = (0..<5).map { _ in store.storeElement(el, owner: "look_1") }
+let b = (0..<2).map { _ in store.storeElement(el, owner: "look_2") }
+check(a[0].range(of: "^e[0-9a-f]+-[0-9]+$", options: .regularExpression) != nil, "element ref carries the epoch")
+check(store.elementCount == 7, "owned refs stored")
+store.dropElements(owner: "look_1")
+check(store.elementCount == 2 && store.element(for: a[0]) == nil && store.element(for: b[1]) != nil, "dropping a look frees only its refs")
+store.dropElements(owner: "look_1")
+check(store.elementCount == 2, "dropping twice is a no-op")
+let u = (0..<5).map { _ in store.storeElement(el, snapshot: AXRefStore.Snapshot(role: "r", identifier: "", label: "", rect: .zero)) }
+check(store.elementCount == 5, "unowned refs capped at 3")
+check(store.element(for: u[0]) == nil && store.snapshot(for: u[1]) == nil && store.element(for: u[4]) != nil, "unowned FIFO evicts the oldest with its snapshot")
+check(AXRefStore().storeWindow(el) != w1, "another store (helper process) never reissues the same ref")
 
 if failures > 0 { exit(1) }
 print("macos native pure checks passed")

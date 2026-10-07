@@ -11,66 +11,6 @@ struct BridgeFailure: Error {
 	let code: String
 }
 
-final class AXRefStore {
-	struct Snapshot {
-		let role: String
-		let identifier: String
-		let label: String
-		let rect: CGRect
-	}
-
-	private var nextId: UInt64 = 0
-	/// Per-process tag: refs from a previous helper process can never match a new helper's refs
-	/// (ids restart at 1), so a stale ref fails instead of resolving to a different element.
-	private let epoch = String(UInt32.random(in: 0x1000...0xFFFF_FFFF), radix: 16)
-	private var windows: [String: AXUIElement] = [:]
-	private var elements: [String: AXUIElement] = [:]
-	private var snapshots: [String: Snapshot] = [:]
-	private let lock = NSLock()
-
-	func storeWindow(_ window: AXUIElement) -> String {
-		lock.lock()
-		defer { lock.unlock() }
-		for (ref, existing) in windows {
-			if CFEqual(existing, window) {
-				return ref
-			}
-		}
-		nextId += 1
-		let ref = "w\(epoch)-\(nextId)"
-		windows[ref] = window
-		return ref
-	}
-
-	func storeElement(_ element: AXUIElement, snapshot: Snapshot? = nil) -> String {
-		lock.lock()
-		defer { lock.unlock() }
-		nextId += 1
-		let ref = "e\(epoch)-\(nextId)"
-		elements[ref] = element
-		snapshots[ref] = snapshot
-		return ref
-	}
-
-	func window(for ref: String) -> AXUIElement? {
-		lock.lock()
-		defer { lock.unlock() }
-		return windows[ref]
-	}
-
-	func element(for ref: String) -> AXUIElement? {
-		lock.lock()
-		defer { lock.unlock() }
-		return elements[ref]
-	}
-
-	func snapshot(for ref: String) -> Snapshot? {
-		lock.lock()
-		defer { lock.unlock() }
-		return snapshots[ref]
-	}
-}
-
 private struct CGWindowCandidate {
 	let windowId: UInt32
 	let title: String
@@ -104,7 +44,106 @@ private struct CapturedWindowImage {
 	let frame: CGRect
 }
 
-// BEGIN PURE (compiled standalone by scripts/check-macos-native-pure.mjs; Foundation only)
+// BEGIN PURE (compiled standalone by scripts/check-macos-native-pure.mjs; Foundation + ApplicationServices only)
+/// Native refs for AX windows and elements. Window refs are deduped and live for the process
+/// (bounded by the number of windows). Element refs are minted fresh per look: refs owned by a look
+/// are dropped when that look ages out (`dropElements(owner:)`); unowned refs (element queries)
+/// sit in a FIFO capped at `unownedCapacity`. Every ref carries a per-process epoch, so a ref from
+/// a previous helper process can never resolve to another element.
+final class AXRefStore {
+	struct Snapshot {
+		let role: String
+		let identifier: String
+		let label: String
+		let rect: CGRect
+	}
+
+	private let unownedCapacity: Int
+	private var nextId: UInt64 = 0
+	private let epoch = String(UInt32.random(in: 0x1000...0xFFFF_FFFF), radix: 16)
+	private var windows: [String: AXUIElement] = [:]
+	private var elements: [String: AXUIElement] = [:]
+	private var snapshots: [String: Snapshot] = [:]
+	private var refsByOwner: [String: [String]] = [:]
+	private var unowned: [String] = []
+	private let lock = NSLock()
+
+	init(unownedCapacity: Int = 1024) {
+		self.unownedCapacity = unownedCapacity
+	}
+
+	func storeWindow(_ window: AXUIElement) -> String {
+		lock.lock()
+		defer { lock.unlock() }
+		for (ref, existing) in windows {
+			if CFEqual(existing, window) {
+				return ref
+			}
+		}
+		nextId += 1
+		let ref = "w\(epoch)-\(nextId)"
+		windows[ref] = window
+		return ref
+	}
+
+	func storeElement(_ element: AXUIElement, snapshot: Snapshot? = nil, owner: String? = nil) -> String {
+		lock.lock()
+		defer { lock.unlock() }
+		nextId += 1
+		let ref = "e\(epoch)-\(nextId)"
+		elements[ref] = element
+		snapshots[ref] = snapshot
+		if let owner {
+			refsByOwner[owner, default: []].append(ref)
+		} else {
+			unowned.append(ref)
+			if unowned.count > unownedCapacity {
+				let evicted = unowned.prefix(unowned.count - unownedCapacity)
+				for old in evicted { removeElement(old) }
+				unowned.removeFirst(evicted.count)
+			}
+		}
+		return ref
+	}
+
+	/// Forget every element ref minted for `owner` (a look that aged out or failed).
+	func dropElements(owner: String) {
+		lock.lock()
+		defer { lock.unlock() }
+		for ref in refsByOwner.removeValue(forKey: owner) ?? [] { removeElement(ref) }
+	}
+
+	/// Live element ref count (tests and diagnostics).
+	var elementCount: Int {
+		lock.lock()
+		defer { lock.unlock() }
+		return elements.count
+	}
+
+	private func removeElement(_ ref: String) {
+		elements.removeValue(forKey: ref)
+		snapshots.removeValue(forKey: ref)
+	}
+
+	func window(for ref: String) -> AXUIElement? {
+		lock.lock()
+		defer { lock.unlock() }
+		return windows[ref]
+	}
+
+	func element(for ref: String) -> AXUIElement? {
+		lock.lock()
+		defer { lock.unlock() }
+		return elements[ref]
+	}
+
+	func snapshot(for ref: String) -> Snapshot? {
+		lock.lock()
+		defer { lock.unlock() }
+		return snapshots[ref]
+	}
+}
+
 /// Modality of a root. An explicit `AXModal` answer is authoritative: Fusion's nonmodal BROWSER
 /// sidebar has subrole AXDialog but AXModal=0. Only when the app does not report `AXModal` at
 /// all does a dialog-like role/subrole count (legacy toolkits).
@@ -1447,8 +1486,13 @@ final class Bridge {
 			imagePayload = nil
 			transform = rectTransform(windowFrame: rootFrame, imageWidth: imageWidth, imageHeight: imageHeight)
 		}
+		// Mint the look id first: it owns every element ref the tree build creates. If the look is never
+		// recorded (an error below), drop those refs instead of leaking them.
+		let lookId = freshLookId()
+		var lookStored = false
+		defer { if !lookStored { refStore.dropElements(owner: lookId) } }
 		let describeStart = Date()
-		let outline = buildLookOutline(root: rootElement, transform: transform)
+		let outline = buildLookOutline(root: rootElement, owner: lookId, transform: transform)
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
@@ -1461,8 +1505,8 @@ final class Bridge {
 			readTextMs = elapsedMs(textStart)
 		}
 
-		let lookId = freshLookId()
 		let baseRecord = baseLookId.flatMap { lookRecord(for: $0) }
+		lookStored = true
 		storeLookRecord(LookRecord(
 			lookId: lookId,
 			windowId: windowId ?? baseRecord?.windowId ?? 0,
@@ -1511,6 +1555,7 @@ final class Bridge {
 		while lookRecordOrder.count > 8 {
 			let oldest = lookRecordOrder.removeFirst()
 			lookRecords.removeValue(forKey: oldest)
+			refStore.dropElements(owner: oldest)
 		}
 	}
 
@@ -1549,8 +1594,8 @@ final class Bridge {
 		return CGRect(x: x1, y: y1, width: max(0, x2 - x1), height: max(0, y2 - y1))
 	}
 
-	private func buildLookOutline(root: AXUIElement, transform: @escaping (CGRect) -> CGRect) -> LookNode {
-		let rootNode = lookNode(element: root, transform: transform, offscreen: false)
+	private func buildLookOutline(root: AXUIElement, owner: String, transform: @escaping (CGRect) -> CGRect) -> LookNode {
+		let rootNode = lookNode(element: root, transform: transform, offscreen: false, owner: owner)
 		let nodeLimit = 2000
 		// Apps with slow AX servers (e.g. Outlook) can take >30s to describe; the
 		// client aborts at 33s, so stop walking well before that and return a
@@ -1580,7 +1625,7 @@ final class Bridge {
 				seen.insert(identity)
 				let role = stringAttribute(child, attribute: kAXRoleAttribute as CFString) ?? ""
 				let offscreen = childOffscreen(child, role: role, visibleByKind: visibleByKind)
-				let childNode = lookNode(element: child, transform: transform, offscreen: offscreen)
+				let childNode = lookNode(element: child, transform: transform, offscreen: offscreen, owner: owner)
 				node.children.append(childNode)
 				queue.append((child, childNode))
 				walked += 1
@@ -1589,7 +1634,8 @@ final class Bridge {
 		return rootNode
 	}
 
-	private func lookNode(element: AXUIElement, transform: (CGRect) -> CGRect, offscreen: Bool) -> LookNode {
+	/// `owner` is the look whose lifetime bounds the element ref; nil for one-off element queries.
+	private func lookNode(element: AXUIElement, transform: (CGRect) -> CGRect, offscreen: Bool, owner: String? = nil) -> LookNode {
 		let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
 		let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
 		let actions = actionNames(element)
@@ -1609,7 +1655,7 @@ final class Bridge {
 				identifier: stringAttribute(element, attribute: "AXIdentifier" as CFString) ?? "",
 				label: normalizedLabel([title, description, value].joined(separator: " ")),
 				rect: screenRect
-			)),
+			), owner: owner),
 			role: role,
 			subrole: subrole,
 			identifier: stringAttribute(element, attribute: "AXIdentifier" as CFString) ?? "",
@@ -2907,6 +2953,26 @@ final class Bridge {
 			}
 			return CGPoint(x: x, y: y)
 		}
+		switch action {
+		case "activateApp":
+			return try activateApp(try stringArg(request, "app"))
+		case "readClipboard":
+			guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+				throw BridgeFailure(message: "The clipboard holds no text", code: "clipboard_empty")
+			}
+			let limit = 100_000
+			return ["performed": action, "text": String(text.prefix(limit)), "truncated": text.count > limit, "length": text.count]
+		case "writeClipboard":
+			let text = try stringArg(request, "text")
+			guard !text.isEmpty else { throw BridgeFailure(message: "writeClipboard requires non-empty text", code: "invalid_args") }
+			NSPasteboard.general.clearContents()
+			guard NSPasteboard.general.setString(text, forType: .string) else {
+				throw BridgeFailure(message: "The clipboard rejected the text", code: "clipboard_write_failed")
+			}
+			return ["performed": action, "length": text.count]
+		default:
+			break
+		}
 		let button = mouseButton(optionalStringArg(request, "button") ?? "left")
 		switch action {
 		case "moveMouse":
@@ -2941,6 +3007,75 @@ final class Bridge {
 		usleep(30_000)
 		let cursor = CGEvent(source: nil)?.location ?? .zero
 		return ["performed": action, "mouse": ["x": cursor.x, "y": cursor.y]]
+	}
+
+	/// Bring an app (name or bundle id) to the front, launching it when not running. Activation goes
+	/// through Launch Services via `/usr/bin/open` (what `open -a` does): `NSRunningApplication.activate`
+	/// and AX `AXFrontmost` are refused from a background helper on macOS 14+ (cooperative activation).
+	/// It runs as a killable subprocess because an in-process `openApplication` was seen to hang in
+	/// the kernel (`_sandbox_extension_issue`) and wedge the daemon's serial Launch Services queue.
+	/// Unbundled executables have no bundle URL and get AX + `activate()` only. Fails with
+	/// `activation_failed` unless the app is frontmost within 5s.
+	private func activateApp(_ query: String) throws -> [String: Any] {
+		let wanted = query.trimmingCharacters(in: .whitespaces)
+		guard !wanted.isEmpty else { throw BridgeFailure(message: "activateApp requires app", code: "invalid_args") }
+		func runningApp() -> NSRunningApplication? {
+			NSWorkspace.shared.runningApplications.first {
+				$0.bundleIdentifier?.caseInsensitiveCompare(wanted) == .orderedSame
+					|| $0.localizedName?.caseInsensitiveCompare(wanted) == .orderedSame
+					|| $0.executableURL?.lastPathComponent.caseInsensitiveCompare(wanted) == .orderedSame
+			}
+		}
+		let running = runningApp()
+		let home = FileManager.default.homeDirectoryForCurrentUser.path
+		let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: wanted)
+			?? ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/System/Library/CoreServices", "\(home)/Applications"]
+				.map { URL(fileURLWithPath: "\($0)/\(wanted).app") }
+				.first { FileManager.default.fileExists(atPath: $0.path) }
+		guard running != nil || installed != nil else {
+			throw BridgeFailure(message: "No running or installed app named '\(wanted)'", code: "app_not_found")
+		}
+		var app = running
+		if let url = running?.bundleURL ?? installed {
+			let process = Process()
+			process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+			process.arguments = [url.path]
+			process.standardOutput = FileHandle.nullDevice
+			process.standardError = FileHandle.nullDevice
+			try process.run()
+			let deadline = Date().addingTimeInterval(10)
+			while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+			if process.isRunning {
+				process.terminate()
+				throw BridgeFailure(message: "Launch Services did not open '\(wanted)' within 10s", code: "activation_failed")
+			}
+			guard process.terminationStatus == 0 else {
+				throw BridgeFailure(message: "open exited \(process.terminationStatus) for '\(wanted)'", code: "activation_failed")
+			}
+			// A fresh launch registers asynchronously; wait for the process to appear.
+			let launchDeadline = Date().addingTimeInterval(10)
+			while app == nil && Date() < launchDeadline {
+				app = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL } ?? runningApp()
+				if app == nil { Thread.sleep(forTimeInterval: 0.1) }
+			}
+		}
+		guard let app else { throw BridgeFailure(message: "No running or installed app named '\(wanted)'", code: "app_not_found") }
+		let pid = app.processIdentifier
+		let element = AXUIElementCreateApplication(pid)
+		let deadline = Date().addingTimeInterval(5)
+		var nudged = Date.distantPast
+		repeat {
+			if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+				return ["performed": "activateApp", "pid": Int(pid), "appName": app.localizedName ?? wanted, "bundleId": app.bundleIdentifier ?? "", "frontmost": true]
+			}
+			if Date().timeIntervalSince(nudged) > 0.5 {
+				nudged = Date()
+				AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+				app.activate()
+			}
+			usleep(50_000)
+		} while Date() < deadline
+		throw BridgeFailure(message: "'\(app.localizedName ?? wanted)' did not become frontmost within 5s", code: "activation_failed")
 	}
 
 	private func getMousePosition() -> [String: Any] {
