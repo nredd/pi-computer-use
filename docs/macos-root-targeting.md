@@ -51,4 +51,27 @@ element live. Refs from earlier sessions, pids and state ids are stale: rediscov
 
 ## Real GUI validation
 
-See the section below, filled in after running against live Fusion and Bambu Studio.
+Run 2026-10-07 against existing Fusion (pid 32012) and Bambu Studio (pid 65354), fork `v0.5.1-nredd.1`
+(`2c3dd8b`). Gotcha: the helper process started before the rebuilt binary was installed kept running
+the old code; the sidebar still showed `modal` until the helper was killed and respawned.
+
+Worked:
+- Fusion BROWSER sidebar (`AXDialog`, `AXModal=0`, pairing low/10): `modal` on 0.5.1, nonmodal on the fork.
+  Semantic observe of it works.
+- `act_ui` press on the main window while the sidebar was up: delivered to the main window and the
+  returned state was the main window (`@r2`), not the sidebar. Used the already selected Py radio, no
+  design change.
+- Bambu Cmd+O raised an "unsaved changes" prompt (`dialog`, modal, exact pairing). Escape cancelled it.
+  `act_ui` reported the source root closed with no successor (`cause: closed`) and no fabricated state.
+- Stale and bogus refs (`@r16` after the dialog closed, `@r99`) fail with a clear "stale" / "not available
+  in this session, call find_roots" error.
+
+Observed, not fixed:
+- observe on a root ref can return a different `@r` (`@r16` -> `@r17`); refs are not stable across a dialog's life.
+
+Not validated:
+- An unpaired dialog (no `windowId`): none was available, every dialog seen paired. The `windowRef`
+  forwarding and `root_not_capturable` paths are covered by unit tests only.
+- `root_stale` and `cause: replaced` on a live app; ref expiry after long gaps (no TTL measured).
+- Fusion batch (Py via SPACE, click console, type, RETURN) was not re-run.
+- Bambu Cmd+I/Cmd+N dialogs.
