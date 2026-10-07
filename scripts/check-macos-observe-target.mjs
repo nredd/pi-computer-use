@@ -54,4 +54,11 @@ for (const name of ["axWaitFor", "focusWindow"]) {
 	assert.equal("rootRef" in sent, false, `${name} rootRef`);
 }
 
+// Stale daemon detection: process older than the installed binary runs old code.
+const { helperPredatesBinary } = await import("../src/platform/macos/helper.ts");
+assert.equal(helperPredatesBinary(1_000_000, 1_060_000), true);
+assert.equal(helperPredatesBinary(1_060_000, 1_000_000), false);
+assert.equal(helperPredatesBinary(1_000_000, 1_000_500), false, "sub-second skew is not stale");
+assert.equal(helperPredatesBinary(Number.NaN, 5), false);
+
 console.log("macos observe target checks passed");

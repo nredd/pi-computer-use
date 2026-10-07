@@ -362,6 +362,11 @@ async function ensureHelperParentDirectory() {
 	await fs.access(parentPath, fsConstants.W_OK);
 }
 
+/** A running helper keeps its old code after the bundle is replaced; stop it so the next command relaunches the new one. */
+async function stopRunningHelper() {
+	await execFile("pkill", ["-f", `${helperAppExecutablePath} serve`]).catch(() => {});
+}
+
 async function installPrebuiltHelperApp(sourceAppPath) {
 	await ensureHelperParentDirectory();
 	const sourceExecutablePath = path.join(sourceAppPath, "Contents", "MacOS", "bridge");
@@ -377,6 +382,7 @@ async function installPrebuiltHelperApp(sourceAppPath) {
 	// The sealed bundle must arrive intact — a broken signature would burn
 	// the user's TCC grants on an identity that can never validate.
 	await run("codesign", ["--verify", "--strict", sourceAppPath]);
+	await stopRunningHelper();
 	await fs.rm(helperAppPath, { force: true, recursive: true });
 	// ditto preserves the bundle byte-for-byte (signature + stapled
 	// notarization ticket). The sealed app is NEVER re-signed here: its
@@ -430,6 +436,7 @@ async function installHelperApp(sourcePath) {
 
 	await fs.mkdir(path.dirname(helperAppExecutablePath), { recursive: true });
 	await fs.mkdir(path.dirname(helperSourceHashPath), { recursive: true });
+	await stopRunningHelper();
 	await fs.copyFile(sourcePath, helperAppExecutablePath);
 	await fs.chmod(helperAppExecutablePath, 0o755);
 	await fs.writeFile(infoPlistPath, infoPlist);

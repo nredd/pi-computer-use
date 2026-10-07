@@ -44,6 +44,12 @@ Terminal `act_ui` results always say the action was delivered, and:
 Native refs live in the helper's `refStore` and are only valid while the helper process and the AX
 element live. Refs from earlier sessions, pids and state ids are stale: rediscover with `find_roots`.
 
+## Helper lifecycle
+
+The helper daemon outlives pi, so a reinstall alone leaves old code running. Two guards:
+- `scripts/setup-helper.mjs` stops the running helper (`pkill -f '<bridge> serve'`) whenever it replaces the bundle
+- `ensureProtocol()` restarts a daemon whose process started before the installed binary was written (`helperPredatesBinary`)
+
 ## Tests
 
 `npm run test:macos-target`, `test:macos-native` (compiles the `PURE` region of `bridge.swift`),

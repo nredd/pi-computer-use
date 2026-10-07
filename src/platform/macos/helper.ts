@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, realpath } from "node:fs/promises";
+import { access, mkdir, realpath, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +72,33 @@ async function isResolvedHelperExecutable(filePath?: string): Promise<boolean> {
 		realpath(HELPER_APP_EXECUTABLE_PATH).catch(() => path.resolve(HELPER_APP_EXECUTABLE_PATH)),
 	]);
 	return actualPath === expectedPath;
+}
+
+/** True when the daemon process started before the installed binary was last written (it runs old code). */
+export function helperPredatesBinary(processStartMs: number, binaryMtimeMs: number): boolean {
+	return Number.isFinite(processStartMs) && Number.isFinite(binaryMtimeMs) && processStartMs + 1_000 < binaryMtimeMs;
+}
+
+async function daemonRunsOldBinary(pid: number): Promise<boolean> {
+	if (!Number.isFinite(pid) || pid <= 0) return false;
+	try {
+		const elapsed = await new Promise<string>((resolve, reject) => {
+			const child = spawn("ps", ["-o", "etime=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+			let out = "";
+			child.stdout.on("data", (chunk) => { out += chunk; });
+			child.on("error", reject);
+			child.on("close", () => resolve(out.trim()));
+		});
+		// etime is [[dd-]hh:]mm:ss
+		const [days, clock] = elapsed.includes("-") ? elapsed.split("-") : ["0", elapsed];
+		const parts = clock.split(":").map(Number);
+		const seconds = parts.reduce((total, part) => total * 60 + part, 0) + Number(days) * 86_400;
+		if (!Number.isFinite(seconds)) return false;
+		const { mtimeMs } = await stat(HELPER_APP_EXECUTABLE_PATH);
+		return helperPredatesBinary(Date.now() - seconds * 1_000, mtimeMs);
+	} catch {
+		return false;
+	}
 }
 
 export async function runProcess(
@@ -269,7 +296,7 @@ export class MacosHelperClient {
 	async ensureProtocol(signal?: AbortSignal): Promise<PlatformDiagnostics> {
 		let diagnostics = await this.diagnosticsCommand(signal);
 		const executableMatches = await isResolvedHelperExecutable(diagnostics.executablePath);
-		if (diagnostics.protocolVersion === HELPER_PROTOCOL_VERSION && executableMatches) return diagnostics;
+		if (diagnostics.protocolVersion === HELPER_PROTOCOL_VERSION && executableMatches && !(await daemonRunsOldBinary(diagnostics.pid))) return diagnostics;
 
 		// The helper daemon outlives Pi, so restarting/reloading Pi alone does not
 		// replace a stale daemon or one launched from the legacy system location.
