@@ -20,6 +20,9 @@ final class AXRefStore {
 	}
 
 	private var nextId: UInt64 = 0
+	/// Per-process tag: refs from a previous helper process can never match a new helper's refs
+	/// (ids restart at 1), so a stale ref fails instead of resolving to a different element.
+	private let epoch = String(UInt32.random(in: 0x1000...0xFFFF_FFFF), radix: 16)
 	private var windows: [String: AXUIElement] = [:]
 	private var elements: [String: AXUIElement] = [:]
 	private var snapshots: [String: Snapshot] = [:]
@@ -34,7 +37,7 @@ final class AXRefStore {
 			}
 		}
 		nextId += 1
-		let ref = "w\(nextId)"
+		let ref = "w\(epoch)-\(nextId)"
 		windows[ref] = window
 		return ref
 	}
@@ -43,7 +46,7 @@ final class AXRefStore {
 		lock.lock()
 		defer { lock.unlock() }
 		nextId += 1
-		let ref = "e\(nextId)"
+		let ref = "e\(epoch)-\(nextId)"
 		elements[ref] = element
 		snapshots[ref] = snapshot
 		return ref

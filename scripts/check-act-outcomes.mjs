@@ -16,7 +16,7 @@ const codeError = (message, code) => Object.assign(new Error(message), { code })
 const text = (result) => result.content[0].text;
 
 // Dialog dismissed, main window remains and a new root appeared -> replaced, successor named.
-rootsAfter([{ pid: 7, rootRef: "ax:main", windowRef: "ax:main", windowId: 5 }, { pid: 7, rootRef: "ax:new", windowRef: "ax:new", kind: "dialog" }]);
+rootsAfter([{ pid: 7, rootRef: "ax:main", windowRef: "ax:main", windowId: 5, kind: "window", title: "Main", framePoints: { x: 0, y: 0, w: 9, h: 9 }, scaleFactor: 1 }, { pid: 7, rootRef: "ax:new", windowRef: "ax:new", kind: "dialog", title: "Confirm", framePoints: { x: 1, y: 1, w: 9, h: 9 }, scaleFactor: 1 }]);
 let result = await terminalDesktopActionResult(target, "s1", {
 	strategy: "act",
 	rootDelta: [
@@ -26,7 +26,8 @@ let result = await terminalDesktopActionResult(target, "s1", {
 }, new Error("Root is not available through Accessibility"));
 assert.equal(result.details.status, "target_closed");
 assert.equal(result.details.cause, "replaced");
-assert.equal(result.details.successors[0].ref, "ax:new");
+assert.match(result.details.successors[0].ref, /^@r\d+$/, "successor ref must be an extension @r ref, not a helper-native ref");
+assert.doesNotMatch(JSON.stringify(result.details), /ax:new/, "native ref leaked");
 assert.match(text(result), /delivered/);
 assert.match(text(result), /replaced by dialog "Confirm" \(modal\)/);
 

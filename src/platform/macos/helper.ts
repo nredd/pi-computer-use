@@ -94,8 +94,9 @@ async function daemonRunsOldBinary(pid: number): Promise<boolean> {
 		const parts = clock.split(":").map(Number);
 		const seconds = parts.reduce((total, part) => total * 60 + part, 0) + Number(days) * 86_400;
 		if (!Number.isFinite(seconds)) return false;
-		const { mtimeMs } = await stat(HELPER_APP_EXECUTABLE_PATH);
-		return helperPredatesBinary(Date.now() - seconds * 1_000, mtimeMs);
+		// ctime, not mtime: ditto preserves mtime, but any install changes ctime.
+		const { ctimeMs } = await stat(HELPER_APP_EXECUTABLE_PATH);
+		return helperPredatesBinary(Date.now() - seconds * 1_000, ctimeMs);
 	} catch {
 		return false;
 	}

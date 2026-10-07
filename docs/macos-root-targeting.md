@@ -42,8 +42,19 @@ Terminal `act_ui` results always say the action was delivered, and:
 
 ## Ref lifecycle
 
-Native refs live in the helper's `refStore` and are only valid while the helper process and the AX
-element live. Refs from earlier sessions, pids and state ids are stale: rediscover with `find_roots`.
+Measured, not assumed:
+- The helper stores native refs (`w<epoch>-<n>` roots, `e<epoch>-<n>` elements) in dictionaries with no TTL, no
+  idle exit and no eviction (look records are capped at 8). A ref dies when its AX element dies (window closed)
+  or the helper process restarts. The daemon does not exit when idle.
+- Refs carry a per-process epoch, so a ref from before a helper restart never resolves; it used to be possible
+  for `w3` from an old helper to name a different window in a new one.
+- Helper restarts happen on reinstall, protocol/binary mismatch, permission relaunch. The extension's `@rN`
+  records survive them, so `@rN` can outlive its native ref: expect `root_not_found` / "stale", then rediscover
+  with `find_roots`. Refs from earlier sessions, pids and state ids are stale.
+- Root deltas in `act_ui` results are rewritten to the extension's `@rN` refs. Before, they showed the helper's
+  native ref with an `@` prepended (`@r2`) that was a different namespace from `find_roots`' `@r3` for the same
+  dialog. A delta for a root that cannot be resolved shows no ref.
+- Known limitation: the helper's element ref table grows for the life of the daemon.
 
 ## Helper lifecycle
 
@@ -59,7 +70,9 @@ Both tools exist on macOS only, serialize behind one lock, and refuse when `head
 `desktop_screenshot` captures a full display (cursor included, `display` 0 is main) and states the
 image-to-point mapping. `desktop_input` posts physical HID input in global points: `moveMouse`,
 `click`, `scroll`, `drag`, `typeText`, `keypress`. It moves the real cursor and types into whatever has
-focus, so verify with a screenshot. Prefer `act_ui` for controls reachable by ref. Helper commands:
+focus, so verify with a screenshot. Input goes to the *frontmost app*: raising a window
+inside a background app is not enough (`focusWindow` can report `focused` while another app is frontmost),
+activate the app first. `scroll` follows macOS natural scrolling: `scrollY: -5` arrives as a positive delta. Prefer `act_ui` for controls reachable by ref. Helper commands:
 `captureDisplay`, `desktopInput` (wire actions `type`/`key`). Needs Screen Recording and Accessibility.
 
 ## Tests
@@ -107,4 +120,19 @@ Bugs found by the live run and fixed:
 - Returned `mouse` came from `NSEvent.mouseLocation` (bottom-left origin) and was read before the move settled; now `CGEvent(source: nil).location` after a short settle
 - Drags posted one event per waypoint; they now interpolate (<=12pt steps) with click state set
 
-Not tested live: clicking or typing on the second display, right/middle buttons, `drag` with more than two waypoints, scroll effect.
+
+
+### Later live results (2026-10-07, final helper)
+
+- Second display (global origin 341,-1080), via a probe window that logs the events it receives (`scripts/fixtures/event-probe.swift`): left,
+  right and middle clicks, double click, unicode typing, `cmd+k` (command flag set) and scroll all arrive at the exact global
+  coordinates sent, including negative y.
+- Multi-waypoint drag selects text in TextEdit; a rejected drag leaves no button held.
+- Real modal `NSAlert` (`scripts/fixtures/alert-app.swift`): ref-only observe works, visual gives `root_not_capturable`,
+  `act` press by ref dismisses it; the `act_ui` dismissal reports `target_closed`. Opt-in script: `PI_COMPUTER_USE_LIVE=1 npm run test:macos-live`.
+  It fails when `windowElement` is mutated to always fall back to the first window (checked).
+- Fusion with the sidebar up: Py radio via SPACE, then click console field + `print(1)` + RETURN in one batch; the console shows `1`.
+- Bambu Cmd+I: `act_ui` reports `New root: dialog "Open" (modal)` and a `Note:` that a foreground modal is in front. Background-delivered Escape
+  returned outcome `unknown` and did not dismiss the panel; physical Escape via `desktop_input` did, once Bambu was frontmost.
+- No natural unpaired dialog was found (the alert and Open panel pair with `low`/`exact`). The unpaired path is covered by the ref-only live
+  runs above and by `scripts/check-unpaired-act.mjs` (stubbed backend).

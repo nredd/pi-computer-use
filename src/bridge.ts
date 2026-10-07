@@ -19,6 +19,7 @@ import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDeliv
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler } from "./runtime.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
+import { withDesktopLock } from "./desktop.ts";
 import type { PlatformRoot } from "./platform/types.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
@@ -1863,6 +1864,32 @@ function clearDesktopOperationState(state: OperationState): void {
 	state.currentNote = undefined;
 }
 
+/** Extension `@r` ref already issued for a helper-native root ref, without creating one. */
+function extensionRefForNative(pid: number, nativeRef: string): string | undefined {
+	for (const record of runtimeState.windowRefs.values()) {
+		if (record.pid === pid && record.nativeWindowRef === nativeRef) return record.ref;
+	}
+	return undefined;
+}
+
+/**
+ * Helper root deltas name roots by helper-native refs (`r2`), a different namespace from the `@rN` refs
+ * the tools accept. Rewrite every delta ref to the extension ref (registering live roots), or drop it.
+ */
+export async function normalizeRootDeltaRefs(execution: ExecutionTrace, target: Pick<ResolvedTarget, "pid" | "appName" | "bundleId">): Promise<void> {
+	let roots: PlatformRoot[] | undefined;
+	for (const delta of execution.rootDelta ?? []) {
+		if (!delta.ref || delta.ref.startsWith("@")) continue;
+		let ext = extensionRefForNative(target.pid, delta.ref);
+		if (!ext && delta.change !== "closed") {
+			roots ??= await currentPlatformBackend.listRoots({ pid: target.pid }).catch(() => []);
+			const root = roots.find((candidate) => candidate.rootRef === delta.ref || candidate.windowRef === delta.ref);
+			if (root) ext = storeWindowRefForAppWindow({ appName: target.appName, bundleId: target.bundleId, pid: target.pid }, root).ref;
+		}
+		delta.ref = ext;
+	}
+}
+
 /** Root kinds that can take over from a window. Menus, popovers and tooltips appearing are not replacements. */
 const REPLACEMENT_ROOT_KINDS = new Set(["window", "dialog", "sheet"]);
 
@@ -1886,6 +1913,7 @@ export async function terminalDesktopActionResult(
 	error: unknown,
 	condition?: ReturnType<typeof validateCondition>,
 ): Promise<AgentToolResult<TerminalDesktopActionDetails>> {
+	await normalizeRootDeltaRefs(execution, target);
 	let exactRootAvailable: boolean | undefined;
 	let liveRoots: PlatformRoot[] = [];
 	try {
@@ -1932,7 +1960,7 @@ export async function terminalDesktopActionResult(
 		}
 	}
 	const successors = targetClosed
-		? (execution.rootDelta ?? []).filter((delta) => delta.change === "appeared" && delta.pid === target.pid && REPLACEMENT_ROOT_KINDS.has(delta.kind) && Boolean(delta.ref) && liveRoots.some((root) => root.pid === target.pid && (root.rootRef === delta.ref || root.windowRef === delta.ref))).map((delta) => ({ ref: delta.ref, kind: delta.kind, title: delta.title, isModal: delta.isModal }))
+		? (execution.rootDelta ?? []).filter((delta) => delta.change === "appeared" && delta.pid === target.pid && REPLACEMENT_ROOT_KINDS.has(delta.kind) && Boolean(delta.ref) && liveRoots.some((root) => root.pid === target.pid && extensionRefForNative(target.pid, root.rootRef ?? root.windowRef ?? "") === delta.ref)).map((delta) => ({ ref: delta.ref, kind: delta.kind, title: delta.title, isModal: delta.isModal }))
 		: [];
 	const status = targetClosed ? "target_closed" : "post_action_observation_failed";
 	const rawMessage = error instanceof Error ? error.message : String(error);
@@ -1978,9 +2006,11 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal, { preferModal: false }), signal);
 	const noteBefore = state.currentNote;
-	return await withWindowWriteLock(target, async () => {
+	// One physical keyboard and pointer: never interleave with desktop_input / desktop_screenshot.
+	return await withDesktopLock(() => withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
+		await normalizeRootDeltaRefs(execution, target);
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {
 			if (condition) {
@@ -2034,7 +2064,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
-	});
+	}));
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
