@@ -679,6 +679,10 @@ final class Bridge {
 			return try axReadText(request)
 		case "getMousePosition":
 			return getMousePosition()
+		case "captureDisplay":
+			return try captureDisplay(request)
+		case "desktopInput":
+			return try desktopInput(request)
 		default:
 			throw BridgeFailure(message: "Unknown command '\(cmd)'", code: "unknown_command")
 		}
@@ -2807,6 +2811,109 @@ final class Bridge {
 			"totalChars": characters.count,
 			"hasMore": end < characters.count,
 		]
+	}
+
+	// MARK: Whole-desktop control (global coordinates, HID delivery)
+
+	/// Capture one display, cursor included. Displays are ordered main first, then by x/y origin.
+	/// Returned `frame` is in global points (top-left origin), the space `desktopInput` consumes.
+	private func captureDisplay(_ request: [String: Any]) throws -> [String: Any] {
+		let index = max(0, optionalIntArg(request, "display") ?? 0)
+		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
+		let semaphore = DispatchSemaphore(value: 0)
+		let result = Box<(CGImage, [[String: Any]], Int)?>(nil)
+		let failure = Box<Error?>(nil)
+		let task = Task {
+			defer { semaphore.signal() }
+			do {
+				let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+				let mainId = CGMainDisplayID()
+				let displays = shareable.displays.sorted { left, right in
+					if (left.displayID == mainId) != (right.displayID == mainId) { return left.displayID == mainId }
+					return (left.frame.minX, left.frame.minY) < (right.frame.minX, right.frame.minY)
+				}
+				guard index < displays.count else {
+					throw BridgeFailure(message: "Display \(index) does not exist (\(displays.count) available)", code: "display_not_found")
+				}
+				let display = displays[index]
+				let config = SCStreamConfiguration()
+				let scale = displayScaleFactor(for: display.frame)
+				config.width = max(1, Int((display.frame.width * scale).rounded()))
+				config.height = max(1, Int((display.frame.height * scale).rounded()))
+				config.showsCursor = true
+				let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: config)
+				let infos = displays.enumerated().map { offset, item -> [String: Any] in
+					["index": offset, "isMain": item.displayID == mainId, "frame": ["x": item.frame.minX, "y": item.frame.minY, "w": item.frame.width, "h": item.frame.height]]
+				}
+				result.value = (image, infos, index)
+			} catch {
+				failure.value = error
+			}
+		}
+		if semaphore.wait(timeout: .now() + .seconds(10)) == .timedOut {
+			task.cancel()
+			throw BridgeFailure(message: "Display capture timed out", code: "capture_timeout")
+		}
+		if let error = failure.value {
+			if let bridge = error as? BridgeFailure { throw bridge }
+			throw BridgeFailure(message: "Display capture failed: \(error.localizedDescription)", code: "capture_failed")
+		}
+		guard let (image, infos, chosen) = result.value, let frameInfo = infos[chosen]["frame"] as? [String: Any] else {
+			throw BridgeFailure(message: "Display capture returned no image", code: "capture_failed")
+		}
+		let output = downscaledImage(image, maxDimension: maxDimension) ?? image
+		guard let jpeg = jpegData(image: output, quality: 0.8) else {
+			throw BridgeFailure(message: "Failed to encode display image as JPEG", code: "encoding_failed")
+		}
+		return [
+			"display": chosen,
+			"displays": infos,
+			"frame": frameInfo,
+			"image": ["jpegBase64": jpeg.base64EncodedString(), "width": output.width, "height": output.height],
+		]
+	}
+
+	/// Global-coordinate input. Always physical (HID), like a person at the keys. Points are global points.
+	private func desktopInput(_ request: [String: Any]) throws -> [String: Any] {
+		let action = try stringArg(request, "action")
+		func point(_ key: String = "") throws -> CGPoint {
+			let source = key.isEmpty ? request : (request[key] as? [String: Any] ?? [:])
+			guard let x = (source["x"] as? NSNumber)?.doubleValue, let y = (source["y"] as? NSNumber)?.doubleValue else {
+				throw BridgeFailure(message: "\(action) requires x and y", code: "invalid_args")
+			}
+			return CGPoint(x: x, y: y)
+		}
+		let button = mouseButton(optionalStringArg(request, "button") ?? "left")
+		switch action {
+		case "moveMouse":
+			try postMouseMove(to: try point(), pid: 0)
+		case "click":
+			let count = max(1, min(3, optionalIntArg(request, "clickCount") ?? 1))
+			try postMouseClick(at: try point(), pid: 0, button: button, clickCount: count)
+		case "scroll":
+			try postScrollWheel(at: try point(), deltaX: optionalIntArg(request, "scrollX") ?? 0, deltaY: optionalIntArg(request, "scrollY") ?? 0, pid: 0)
+		case "drag":
+			guard let raw = request["path"] as? [[String: Any]], raw.count >= 2 else {
+				throw BridgeFailure(message: "drag requires a path of at least two points", code: "invalid_args")
+			}
+			let points = try raw.map { entry -> CGPoint in
+				guard let x = (entry["x"] as? NSNumber)?.doubleValue, let y = (entry["y"] as? NSNumber)?.doubleValue else {
+					throw BridgeFailure(message: "drag path entries require x and y", code: "invalid_args")
+				}
+				return CGPoint(x: x, y: y)
+			}
+			try postMouseDrag(points: points, pid: 0)
+		case "type":
+			try postUnicodeText(try stringArg(request, "text"), pid: 0)
+		case "key":
+			guard let keys = request["keys"] as? [String], !keys.isEmpty else {
+				throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
+			}
+			try postKeyPress(keys: keys, pid: 0)
+		default:
+			throw BridgeFailure(message: "Unknown desktop action '\(action)'", code: "invalid_args")
+		}
+		return ["performed": action, "mouse": getMousePosition()]
 	}
 
 	private func getMousePosition() -> [String: Any] {

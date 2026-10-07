@@ -50,6 +50,14 @@ The helper daemon outlives pi, so a reinstall alone leaves old code running. Two
 - `scripts/setup-helper.mjs` stops the running helper (`pkill -f '<bridge> serve'`) whenever it replaces the bundle
 - `ensureProtocol()` restarts a daemon whose process started before the installed binary was written (`helperPredatesBinary`)
 
+## Whole-desktop control
+
+`desktop_screenshot` captures a full display (cursor included, `display` 0 is main) and states the
+image-to-point mapping. `desktop_input` posts physical HID input in global points: `moveMouse`,
+`click`, `scroll`, `drag`, `typeText`, `keypress`. It moves the real cursor and types into whatever has
+focus, so verify with a screenshot. Prefer `act_ui` for controls reachable by ref. Helper commands:
+`captureDisplay`, `desktopInput` (wire actions `type`/`key`). Needs Screen Recording and Accessibility.
+
 ## Tests
 
 `npm run test:macos-target`, `test:macos-native` (compiles the `PURE` region of `bridge.swift`),
