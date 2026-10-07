@@ -19,6 +19,7 @@ import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDeliv
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler } from "./runtime.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
+import type { PlatformRoot } from "./platform/types.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
@@ -1862,6 +1863,22 @@ function clearDesktopOperationState(state: OperationState): void {
 	state.currentNote = undefined;
 }
 
+/** Root kinds that can take over from a window. Menus, popovers and tooltips appearing are not replacements. */
+const REPLACEMENT_ROOT_KINDS = new Set(["window", "dialog", "sheet"]);
+
+/** Tell the agent when a confirmed modal is now in front of the root it just acted on. */
+async function foregroundModalNote(target: ResolvedTarget): Promise<string | undefined> {
+	try {
+		const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
+		const current = roots.find((root) => exactPlatformRootMatchesTarget(root, target));
+		if (!current || current.isModal) return undefined;
+		const modal = roots.filter((root) => shouldPreferForegroundModalWindow(current, root)).sort((a, b) => scoreWindow(b) - scoreWindow(a))[0];
+		return modal ? `Note: ${modal.kind} ${JSON.stringify(modal.title || "(untitled)")} is now a foreground modal in front of this root. Call find_roots, then observe_ui it.` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 export async function terminalDesktopActionResult(
 	target: ResolvedTarget,
 	baseStateId: string,
@@ -1870,9 +1887,11 @@ export async function terminalDesktopActionResult(
 	condition?: ReturnType<typeof validateCondition>,
 ): Promise<AgentToolResult<TerminalDesktopActionDetails>> {
 	let exactRootAvailable: boolean | undefined;
+	let liveRoots: PlatformRoot[] = [];
 	try {
 		for (let attempt = 0; attempt < 3; attempt += 1) {
 			const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
+			liveRoots = roots;
 			exactRootAvailable = roots.some((root) => exactPlatformRootMatchesTarget(root, target));
 			if (exactRootAvailable) break;
 			if (attempt < 2) await sleep(75);
@@ -1913,11 +1932,12 @@ export async function terminalDesktopActionResult(
 		}
 	}
 	const successors = targetClosed
-		? (execution.rootDelta ?? []).filter((delta) => delta.change === "appeared" && delta.pid === target.pid).map((delta) => ({ ref: delta.ref, kind: delta.kind, title: delta.title, isModal: delta.isModal }))
+		? (execution.rootDelta ?? []).filter((delta) => delta.change === "appeared" && delta.pid === target.pid && REPLACEMENT_ROOT_KINDS.has(delta.kind) && Boolean(delta.ref) && liveRoots.some((root) => root.pid === target.pid && (root.rootRef === delta.ref || root.windowRef === delta.ref))).map((delta) => ({ ref: delta.ref, kind: delta.kind, title: delta.title, isModal: delta.isModal }))
 		: [];
 	const status = targetClosed ? "target_closed" : "post_action_observation_failed";
 	const rawMessage = error instanceof Error ? error.message : String(error);
-	const rootExpired = !targetClosed && /Root is not (available through Accessibility|owned by a running app)|root_not_found/.test(rawMessage);
+	// The probe saw the root listed, yet the helper cannot resolve it: the ref expired. A failed probe proves nothing.
+	const rootExpired = exactRootAvailable === true && (error as { code?: string } | undefined)?.code === "root_not_found";
 	const code = targetClosed ? "target_closed" : rootExpired ? "root_stale" : "post_action_observation_failed";
 	const message = rootExpired ? `Root expired or was never valid for observation (${rawMessage}). Rediscover with find_roots.` : rawMessage;
 	clearDesktopOperationState(operationState());
@@ -1996,12 +2016,17 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+			// An unpaired root (no CG window) cannot be captured; observe it semantically instead of failing the successor.
+			const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target, target.windowId > 0);
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			return await buildToolResult("act_ui", `Executed ${executedActions.length} checked UI action${executedActions.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const built = await buildToolResult("act_ui", `Executed ${executedActions.length} checked UI action${executedActions.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const modalNote = await foregroundModalNote(target);
+			const first = built.content[0];
+			if (modalNote && first?.type === "text") first.text = `${first.text}\n${modalNote}`;
+			return built;
 		} catch (error) {
 			if (signal?.aborted) {
 				clearDesktopOperationState(state);

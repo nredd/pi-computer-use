@@ -364,7 +364,14 @@ async function ensureHelperParentDirectory() {
 
 /** A running helper keeps its old code after the bundle is replaced; stop it so the next command relaunches the new one. */
 async function stopRunningHelper() {
-	await execFile("pkill", ["-f", `${helperAppExecutablePath} serve`]).catch(() => {});
+	// -f takes an extended regex: escape the path so `.`, `+`, `(` and spaces match literally.
+	const pattern = `${helperAppExecutablePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} serve`;
+	await execFile("pkill", ["-f", pattern]).catch(() => {});
+	for (let attempt = 0; attempt < 20; attempt += 1) {
+		const alive = await execFile("pgrep", ["-f", pattern]).then(() => true, () => false);
+		if (!alive) return;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
 }
 
 async function installPrebuiltHelperApp(sourceAppPath) {

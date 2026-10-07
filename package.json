@@ -53,7 +53,7 @@
 	"scripts": {
 		"postinstall": "node scripts/setup-helper.mjs --postinstall",
 		"typecheck": "tsc -p tsconfig.json",
-		"test:schema": "node scripts/check-tool-schemas.mjs",
+		"test:schema": "tsx scripts/check-tool-schemas.mjs",
 		"test:invariants": "node scripts/check-invariants.mjs",
 		"test:lifecycle": "tsx scripts/check-session-lifecycle.mjs",
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",

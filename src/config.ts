@@ -6,6 +6,8 @@ export interface ComputerUseConfig {
 	browser_use: boolean;
 	headless: boolean;
 	cursor_overlay: boolean;
+	/** Whole-desktop screenshot and physical input tools (macOS). Ignored while `headless` is true. */
+	desktop_control: boolean;
 	managed_browser: "helium" | "chrome";
 }
 
@@ -26,6 +28,7 @@ const DEFAULT_CONFIG: ComputerUseConfig = {
 	browser_use: true,
 	headless: false,
 	cursor_overlay: true,
+	desktop_control: true,
 	managed_browser: "chrome",
 };
 
@@ -52,6 +55,8 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
+	const desktopControl = parseBoolean((source as any).desktop_control);
+	if (desktopControl !== undefined) out.desktop_control = desktopControl;
 	const managedBrowser = (source as any).managed_browser;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
 	return out;
@@ -75,6 +80,8 @@ function readEnv(): Partial<ComputerUseConfig> {
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
+	const desktopControl = parseBoolean(process.env.PI_COMPUTER_USE_DESKTOP_CONTROL);
+	if (desktopControl !== undefined) out.desktop_control = desktopControl;
 	const managedBrowser = process.env.PI_COMPUTER_USE_MANAGED_BROWSER;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
 	return out;

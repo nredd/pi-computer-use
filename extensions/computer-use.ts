@@ -185,7 +185,7 @@ const desktopScreenshotTool = defineTool({
 	label: "Desktop Screenshot",
 	description: "Capture a whole display (all apps, menu bar, cursor). Coordinates for desktop_input are global points; the result states the image-to-point mapping.",
 	promptSnippet: "Use for anything outside one app window; screenshot, act with desktop_input, screenshot again to verify.",
-	parameters: Type.Object({ display: Type.Optional(Type.Number({ minimum: 0, description: "Display index, 0 is the main display" })), maxDimension: Type.Optional(Type.Number({ minimum: 200, maximum: 4000 })) }),
+	parameters: Type.Object({ display: Type.Optional(Type.Integer({ minimum: 0, description: "Display index, 0 is the main display" })), maxDimension: Type.Optional(Type.Integer({ minimum: 200, maximum: 4000 })) }),
 	execute: executeDesktopScreenshot,
 });
 
@@ -194,19 +194,24 @@ const desktopInputTool = defineTool({
 	label: "Desktop Input",
 	description: "Physical mouse and keyboard input in global screen points, like a person at the keys. Moves the real cursor and types into whatever has focus.",
 	promptSnippet: "Verify with desktop_screenshot after acting; prefer act_ui for ref-targetable app controls.",
-	parameters: Type.Union([
-		Type.Object({ action: Type.Literal("moveMouse"), ...point }),
-		Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) }),
-		Type.Object({ action: Type.Literal("scroll"), ...point, scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
-		Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }) }),
-		Type.Object({ action: Type.Literal("typeText"), text: Type.String() }),
-		Type.Object({ action: Type.Literal("keypress"), keys: Type.Array(Type.String(), { minItems: 1 }) }),
-	]),
+	parameters: Type.Object({
+		action: Type.Union([Type.Literal("moveMouse"), Type.Literal("click"), Type.Literal("scroll"), Type.Literal("drag"), Type.Literal("typeText"), Type.Literal("keypress")], { description: "moveMouse/click/scroll need x,y; drag needs path; typeText needs text; keypress needs keys" }),
+		x: Type.Optional(Type.Number({ description: "Global point x" })),
+		y: Type.Optional(Type.Number({ description: "Global point y (negative above the main display is valid)" })),
+		button: mouseButton,
+		clickCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 3 })),
+		scrollX: Type.Optional(Type.Integer()),
+		scrollY: Type.Optional(Type.Integer()),
+		path: Type.Optional(Type.Array(Type.Object(point), { minItems: 2 })),
+		text: Type.Optional(Type.String()),
+		keys: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+	}),
 	execute: executeDesktopInput,
 });
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
-	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool, desktopScreenshotTool, desktopInputTool]) pi.registerTool(tool);
+	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
+	if (process.platform === "darwin") for (const tool of [desktopScreenshotTool, desktopInputTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
 		description: "Show pi-computer-use configuration",

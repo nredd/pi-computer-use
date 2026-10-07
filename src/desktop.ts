@@ -1,4 +1,5 @@
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getComputerUseConfig } from "./config.ts";
 import { macosHelper } from "./platform/macos/helper.ts";
 
 /** Global-desktop tools: whole-screen capture and physical input in global point coordinates (macOS). */
@@ -22,8 +23,20 @@ interface DisplayInfo {
 	frame: { x: number; y: number; w: number; h: number };
 }
 
-function assertMacos(): void {
+function assertDesktopControlAllowed(): void {
 	if (process.platform !== "darwin") throw new Error("Desktop control is only implemented on macOS.");
+	const config = getComputerUseConfig();
+	if (config.headless) throw new Error("Desktop control is unavailable while headless is enabled (it moves the real cursor and keyboard).");
+	if (!config.desktop_control) throw new Error("Desktop control is disabled (desktop_control: false / PI_COMPUTER_USE_DESKTOP_CONTROL=0).");
+}
+
+let desktopQueue: Promise<unknown> = Promise.resolve();
+
+/** Desktop tools share one physical keyboard and pointer: run whole calls one at a time, in arrival order. */
+export function withDesktopLock<T>(work: () => Promise<T>): Promise<T> {
+	const run = desktopQueue.then(work, work);
+	desktopQueue = run.catch(() => undefined);
+	return run;
 }
 
 /** Validate before touching the helper so bad input never reaches physical devices. */
@@ -37,7 +50,7 @@ export function validateDesktopInput(params: DesktopInputParams): void {
 			if (params.action === "click" && params.clickCount !== undefined && (!Number.isInteger(params.clickCount) || params.clickCount < 1 || params.clickCount > 3)) {
 				throw new Error("clickCount must be an integer from 1 to 3.");
 			}
-			if (params.action === "scroll" && !(params.scrollX || params.scrollY)) throw new Error("scroll requires a non-zero scrollX or scrollY.");
+			if (params.action === "scroll" && !(Math.trunc(params.scrollX ?? 0) || Math.trunc(params.scrollY ?? 0))) throw new Error("scroll requires a whole-number scrollX or scrollY of at least 1 in magnitude.");
 			return;
 		case "drag":
 			if (!Array.isArray(params.path) || params.path.length < 2 || params.path.some((p) => !finite(p?.x) || !finite(p?.y))) {
@@ -62,12 +75,12 @@ export async function executeDesktopScreenshot(
 	_onUpdate: unknown,
 	_ctx: ExtensionContext,
 ): Promise<AgentToolResult<unknown>> {
-	assertMacos();
-	const result = await macosHelper.command<{ displays: DisplayInfo[]; display: number; frame: DisplayInfo["frame"]; image: { jpegBase64: string; width: number; height: number } }>(
+	assertDesktopControlAllowed();
+	const result = await withDesktopLock(() => macosHelper.command<{ displays: DisplayInfo[]; display: number; frame: DisplayInfo["frame"]; image: { jpegBase64: string; width: number; height: number } }>(
 		"captureDisplay",
 		{ display: params.display ?? 0, maxDimension: params.maxDimension ?? 1600 },
 		{ signal, timeoutMs: 15_000 },
-	);
+	));
 	const f = result.frame;
 	const layout = result.displays.map((d) => `display ${d.index}${d.isMain ? " (main)" : ""}: origin ${Math.round(d.frame.x)},${Math.round(d.frame.y)} size ${Math.round(d.frame.w)}x${Math.round(d.frame.h)}`).join("\n");
 	const scale = result.image.width / f.w;
@@ -90,10 +103,10 @@ export async function executeDesktopInput(
 	_onUpdate: unknown,
 	_ctx: ExtensionContext,
 ): Promise<AgentToolResult<unknown>> {
-	assertMacos();
+	assertDesktopControlAllowed();
 	validateDesktopInput(params);
 	const wire = params.action === "typeText" ? { ...params, action: "type" } : params.action === "keypress" ? { ...params, action: "key" } : params;
-	const result = await macosHelper.command<{ performed: string; mouse: { x: number; y: number } }>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 });
+	const result = await withDesktopLock(() => macosHelper.command<{ performed: string; mouse: { x: number; y: number } }>("desktopInput", { ...wire }, { signal, timeoutMs: 30_000 }));
 	return {
 		content: [{ type: "text", text: `Performed ${result.performed}. Take a desktop_screenshot to verify the result.` }],
 		details: { tool: "desktop_input", action: result.performed },

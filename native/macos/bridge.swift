@@ -125,6 +125,18 @@ func resolveCaptureTarget(windowId: UInt32?, wantsImage: Bool) -> CaptureTarget 
 	if let windowId, windowId > 0 { return wantsImage ? .capture(windowId: windowId) : .semanticOnly }
 	return wantsImage ? .notCapturable : .semanticOnly
 }
+/// Wire `windowId` -> CG window id. 0, negative and out-of-range values mean "no window" (unpaired root).
+func normalizedWindowId(_ raw: Int?) -> UInt32? {
+	guard let raw, raw > 0, raw <= Int(UInt32.max) else { return nil }
+	return UInt32(raw)
+}
+
+/// Only an unqualified request (no id, no ref) may take the app's first window. A ref that no longer
+/// resolves must fail instead of silently targeting some other window.
+func allowsFirstWindowFallback(windowId: UInt32?, windowRef: String?) -> Bool {
+	windowId == nil && windowRef == nil
+}
+
 /// Points from `start` (exclusive) to `end` (inclusive), no more than `maxStep` apart, capped at 400 steps.
 func interpolatedDragPoints(from start: CGPoint, to end: CGPoint, maxStep: CGFloat) -> [CGPoint] {
 	let distance = hypot(end.x - start.x, end.y - start.y)
@@ -727,8 +739,7 @@ final class Bridge {
 
 	/// `windowId` from the wire, treating 0 or negative as absent (unpaired roots have no CG window).
 	private func positiveWindowId(_ request: [String: Any]) -> UInt32? {
-		guard let value = optionalIntArg(request, "windowId"), value > 0 else { return nil }
-		return UInt32(value)
+		normalizedWindowId(optionalIntArg(request, "windowId"))
 	}
 
 	private func optionalIntArg(_ request: [String: Any], _ key: String) -> Int? {
@@ -1369,7 +1380,7 @@ final class Bridge {
 		let captureStart = Date()
 		let shouldCapture = !isMenuRoot && (includeImage || readText == "always")
 		if resolveCaptureTarget(windowId: windowId, wantsImage: shouldCapture) == .notCapturable {
-			throw BridgeFailure(message: "Root has no capturable window (unpaired with any on-screen window); use semantic observation (image: never)", code: "root_not_capturable")
+			throw BridgeFailure(message: "Root has no capturable window (unpaired with any on-screen window); use semantic observation (mode: semantic)", code: "root_not_capturable")
 		}
 		let capture = try shouldCapture ? windowId.map { try captureWindow(windowId: $0) } : nil
 		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
@@ -2524,7 +2535,7 @@ final class Bridge {
 		guard !windows.isEmpty else { return nil }
 		guard let windowId else {
 			// A requested ref that no longer resolves must fail, never fall back to another window.
-			return windowRef == nil ? windows.first : nil
+			return allowsFirstWindowFallback(windowId: windowId, windowRef: windowRef) ? windows.first : nil
 		}
 		let candidates = cgWindowCandidates(pid: pid)
 		let pairings = windowPairings(windows: windows, candidates: candidates)
@@ -3572,27 +3583,38 @@ final class Bridge {
 		postEvent(down, pid: pid, delivery: delivery)
 		usleep(30_000)
 
-		// Real drags are a stream of positions; apps ignore a single long jump. Step each segment (~12pt).
+		// Real drags are a stream of positions; apps ignore a single long jump. Step each segment (~12pt),
+		// widening the step so the whole drag stays under ~1000 events (about 8s).
+		var total: CGFloat = 0
+		for pair in zip(points, points.dropFirst()) { total += hypot(pair.1.x - pair.0.x, pair.1.y - pair.0.y) }
+		let maxStep = max(12, total / 1000)
 		var previous = first
-		for point in points.dropFirst() {
-			for step in interpolatedDragPoints(from: previous, to: point, maxStep: 12) {
-				guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: step, mouseButton: .left) else {
-					throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
-				}
-				drag.setIntegerValueField(.mouseEventClickState, value: 1)
-				postEvent(drag, pid: pid, delivery: delivery)
-				usleep(8_000)
+		var lastPosition = first
+		func releaseButton(at position: CGPoint) {
+			if let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: position, mouseButton: .left) {
+				up.setIntegerValueField(.mouseEventClickState, value: 1)
+				postEvent(up, pid: pid, delivery: delivery)
 			}
-			previous = point
 		}
-
-		guard let last = points.last,
-			let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: last, mouseButton: .left)
-		else {
-			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
+		// Never leave the button held if anything below fails.
+		do {
+			for point in points.dropFirst() {
+				for step in interpolatedDragPoints(from: previous, to: point, maxStep: maxStep) {
+					guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: step, mouseButton: .left) else {
+						throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
+					}
+					drag.setIntegerValueField(.mouseEventClickState, value: 1)
+					postEvent(drag, pid: pid, delivery: delivery)
+					lastPosition = step
+					usleep(8_000)
+				}
+				previous = point
+			}
+		} catch {
+			releaseButton(at: lastPosition)
+			throw error
 		}
-		up.setIntegerValueField(.mouseEventClickState, value: 1)
-		postEvent(up, pid: pid, delivery: delivery)
+		releaseButton(at: points.last ?? lastPosition)
 	}
 
 	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, delivery: String = "hid") throws {

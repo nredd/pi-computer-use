@@ -9,14 +9,14 @@ Fork notes for `nredd/pi-computer-use`. Contracts the macOS path guarantees.
 - `rootRef` and `windowRef` are the same native ref. Every macOS helper call (`look`,
   `focusWindow`, `axWaitFor`) goes through `normalizeTarget()` in `src/platform/macos/backend.ts`,
   which sends only `windowRef`.
-- The helper treats `windowId <= 0` as absent. A `windowRef` that no longer resolves fails; it
-  never falls back to the app's first window.
+- The helper treats `windowId <= 0` as absent. A request with a `windowRef` and no usable `windowId` that no longer resolves fails; it
+  never falls back to the app's first window. With a positive `windowId` it still pairs by id.
 - Looks remember their `windowRef`, so `act` resolves the root by ref for unpaired roots.
 
 ## Capture
 
 - Paired root: semantic and visual observation work.
-- Unpaired root: semantic works. Visual fails with `root_not_capturable`; use `image: never`.
+- Unpaired root: semantic works. Visual `observe_ui` fails with `root_not_capturable`; use `mode: semantic`. The `act_ui` successor capture downgrades to semantic automatically.
   No other window is ever captured in its place.
 
 ## Modality
@@ -25,19 +25,20 @@ Fork notes for `nredd/pi-computer-use`. Contracts the macOS path guarantees.
 report `AXModal` at all, a dialog-like role/subrole still counts. An explicit `AXModal == false`
 wins: Fusion's BROWSER sidebar (subrole `AXDialog`, `AXModal=0`) is nonmodal.
 
-`act_ui` no longer redirects to a foreground modal. Actions and the successor capture stay on the
-root the state belongs to; a modal that appears afterwards shows up in `rootDelta` as `appeared`.
-`observe_ui` without a root may still prefer a confirmed foreground modal.
+`act_ui` acts on, and captures the successor of, the root its state belongs to; it does not retarget to
+a foreground modal. If a confirmed modal is in front afterwards, the result ends with a `Note:` line
+naming it. Other tools (`observe_ui` without a root, `wait_for`, `read_text`) may still prefer a
+confirmed foreground modal, so they can disagree with `act_ui` about which root is current.
 
 ## Post-action outcomes
 
 Terminal `act_ui` results always say the action was delivered, and:
 
-- `target_closed`, `cause: replaced`, `successors: [...]`: source root gone and new roots of the
-  same pid appeared. Observe a successor via `find_roots`.
+- `target_closed`, `cause: replaced`, `successors: [...]`: source root gone and new window, dialog or sheet
+  roots of the same pid appeared and are still live (menus and popovers do not count). Observe a successor via `find_roots`.
 - `target_closed`, `cause: closed`: source root gone, nothing replaced it.
-- `post_action_observation_failed` with code `root_stale`: root still listed or unknown but the ref
-  no longer resolves. Rediscover with `find_roots`.
+- `post_action_observation_failed` with code `root_stale`: the root is still listed but the helper answers
+  `root_not_found` for its ref (matched on the error code, not the message). A failed probe stays generic. Rediscover with `find_roots`.
 
 ## Ref lifecycle
 
@@ -52,6 +53,9 @@ The helper daemon outlives pi, so a reinstall alone leaves old code running. Two
 
 ## Whole-desktop control
 
+Both tools exist on macOS only, serialize behind one lock, and refuse when `headless` is true or
+`desktop_control` is false (`PI_COMPUTER_USE_DESKTOP_CONTROL=0`). They are on by default.
+
 `desktop_screenshot` captures a full display (cursor included, `display` 0 is main) and states the
 image-to-point mapping. `desktop_input` posts physical HID input in global points: `moveMouse`,
 `click`, `scroll`, `drag`, `typeText`, `keypress`. It moves the real cursor and types into whatever has
@@ -61,7 +65,8 @@ focus, so verify with a screenshot. Prefer `act_ui` for controls reachable by re
 ## Tests
 
 `npm run test:macos-target`, `test:macos-native` (compiles the `PURE` region of `bridge.swift`),
-`test:act-outcomes`.
+`test:act-outcomes`, `test:desktop`. Swift glue outside the `PURE` region (`windowElement`, `look`,
+`act`, `desktopInput` parsing) has no automated test; it was only exercised live.
 
 ## Real GUI validation
 
